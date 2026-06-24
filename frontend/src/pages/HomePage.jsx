@@ -6,7 +6,7 @@ const CATEGORY_ICONS = {
   'הליכות עולם': '🌍',
   'הלכה יומית':  '⚖️',
   'השיעור השבועי': '📅',
-  'שיחת חולין של תלמידי חכמים': '🎙️',
+  'שיחת חולין': '🎙️',
 }
 
 export default function HomePage({ catalog, onCategorySelect }) {
