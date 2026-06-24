@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useCallback } from 'react'
 import { Search, Filter, SlidersHorizontal } from 'lucide-react'
 import VideoCard from '../components/VideoCard.jsx'
 
@@ -10,6 +10,7 @@ export default function SearchPage({ allVideos, categories, years }) {
   const [category, setCategory] = useState(ALL_LABEL)
   const [year, setYear]         = useState(ALL_YEARS)
   const [searched, setSearched] = useState(false)
+  const [loading, setLoading]   = useState(false)
 
   const results = useMemo(() => {
     if (!searched) return []
@@ -27,7 +28,14 @@ export default function SearchPage({ allVideos, categories, years }) {
     })
   }, [allVideos, query, category, year, searched])
 
-  const handleSearch = () => setSearched(true)
+  const handleSearch = useCallback(() => {
+    setLoading(true)
+    setSearched(false)
+    setTimeout(() => {
+      setSearched(true)
+      setLoading(false)
+    }, 400)
+  }, [])
 
   const handleKey = (e) => { if (e.key === 'Enter') handleSearch() }
 
@@ -80,29 +88,39 @@ export default function SearchPage({ allVideos, categories, years }) {
             </select>
           </div>
 
-          <button style={styles.searchBtn} onClick={handleSearch}>
-            <Search size={15} style={{ marginLeft: 6 }} />
-            חפש
+          <button style={{ ...styles.searchBtn, opacity: loading ? 0.7 : 1 }} onClick={handleSearch} disabled={loading}>
+            {loading
+              ? <span style={styles.spinnerInline} />
+              : <Search size={15} style={{ marginLeft: 6 }} />}
+            {loading ? 'מחפש…' : 'חפש'}
           </button>
         </div>
       </div>
 
+      {/* Spinner */}
+      {loading && (
+        <div style={styles.spinnerWrap}>
+          <div style={styles.spinner} />
+          <p style={styles.spinnerText}>מחפש שיעורים…</p>
+        </div>
+      )}
+
       {/* Results */}
-      {!searched && (
+      {!loading && !searched && (
         <div style={styles.empty}>
           <div style={styles.emptyIcon}>🔍</div>
           <p style={styles.emptyText}>הגדירו פרמטרים לחיפוש ולחצו על "חפש"</p>
         </div>
       )}
 
-      {searched && results.length === 0 && (
+      {!loading && searched && results.length === 0 && (
         <div style={styles.empty}>
           <div style={styles.emptyIcon}>📜</div>
           <p style={styles.emptyText}>לא נמצאו תוצאות. נסו מילות חיפוש אחרות.</p>
         </div>
       )}
 
-      {results.length > 0 && (
+      {!loading && results.length > 0 && (
         <>
           <div style={styles.resultsHeader}>
             <span style={styles.resultCount}>{results.length} שיעורים נמצאו</span>
@@ -232,5 +250,36 @@ const styles = {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
     gap: 20,
+  },
+  spinnerWrap: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: '80px 24px',
+    gap: 16,
+  },
+  spinner: {
+    width: 44,
+    height: 44,
+    border: '4px solid rgba(184,134,11,.2)',
+    borderTop: '4px solid #B8860B',
+    borderRadius: '50%',
+    animation: 'spin 0.8s linear infinite',
+  },
+  spinnerText: {
+    fontFamily: "'Frank Ruhl Libre', serif",
+    fontSize: '1rem',
+    color: '#6B5E47',
+  },
+  spinnerInline: {
+    display: 'inline-block',
+    width: 14,
+    height: 14,
+    border: '2px solid rgba(245,240,232,.4)',
+    borderTop: '2px solid #F5F0E8',
+    borderRadius: '50%',
+    animation: 'spin 0.8s linear infinite',
+    marginLeft: 6,
   },
 }
