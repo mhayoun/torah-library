@@ -1,7 +1,12 @@
 # playlist_utils.py
 import yt_dlp
 
+DEBUG = True
+
 # Category rules mapping: { "Category Name": [list of keywords to match] }
+# NOTE: order matters - categorize_playlists checks categories in this order
+# and stops at the first match. Keep more specific phrases ABOVE generic ones
+# (e.g. a rabbi's name) to avoid accidental cross-matches.
 CATEGORY_MAPPING = {
     "הלכה יומית": ["הלכה יומית"],
     "השיעור השבועי": ["השיעור השבועי", "הרב עובדיה יוסף בוטבול"],
@@ -31,6 +36,21 @@ def get_raw_playlists(urls):
     return raw_entries
 
 
+def find_matching_categories(title):
+    """
+    Returns a list of ALL categories whose keywords appear in `title`.
+    Used for debug purposes to catch ambiguous titles that match more
+    than one category (the first one wins in categorize_playlists, but
+    that may not be the "correct" one).
+    """
+    matches = []
+    for category, keywords in CATEGORY_MAPPING.items():
+        for keyword in keywords:
+            if keyword in title:
+                matches.append((category, keyword))
+    return matches
+
+
 def categorize_playlists(raw_entries):
     """Groups playlists into specified categories using title matching rules."""
     categorized = {category: [] for category in CATEGORY_MAPPING}
@@ -45,15 +65,30 @@ def categorize_playlists(raw_entries):
 
         title = entry.get('title', '')
         playlist_data = {"title": title, "url": url}
-        matched = False
 
-        for category, keywords in CATEGORY_MAPPING.items():
-            if any(keyword in title for keyword in keywords):
-                categorized[category].append(playlist_data)
-                matched = True
-                break
+        all_matches = find_matching_categories(title)
 
-        if not matched:
+        if DEBUG:
+            if not all_matches:
+                print(f"[DEBUG][categorize] '{title}' -> NO MATCH (אחר)")
+            elif len(all_matches) > 1:
+                # Ambiguous: title matches keywords from more than one category.
+                # The first one (by CATEGORY_MAPPING order) wins - flag it so
+                # you can see if that's actually the wrong choice.
+                chosen_category, chosen_keyword = all_matches[0]
+                others = ", ".join(f"{c} (kw='{k}')" for c, k in all_matches[1:])
+                print(
+                    f"[DEBUG][categorize] ⚠️ AMBIGUOUS '{title}' -> chose "
+                    f"'{chosen_category}' (kw='{chosen_keyword}'), also matched: {others}"
+                )
+            else:
+                category, keyword = all_matches[0]
+                print(f"[DEBUG][categorize] '{title}' -> '{category}' (kw='{keyword}')")
+
+        if all_matches:
+            chosen_category = all_matches[0][0]
+            categorized[chosen_category].append(playlist_data)
+        else:
             categorized["אחר"].append(playlist_data)
 
     return categorized

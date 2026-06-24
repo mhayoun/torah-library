@@ -1,12 +1,40 @@
 import os
 import json
 import re
-import traceback
+from datetime import datetime, timezone
 from googleapiclient.discovery import build
+
+from playlist_utils import CATEGORY_MAPPING, find_matching_categories
 
 API_KEY = os.environ.get("YOUTUBE_API_KEY", "")
 DEBUG = True
 OUTPUT_FILE = os.path.join(os.path.dirname(__file__), "..", "frontend", "public", "categorized_videos.json")
+
+_EPOCH = datetime.fromtimestamp(0, tz=timezone.utc).isoformat()
+
+
+# ── helpers (merged in from fetch_videos.py) ─────────────────────────────────
+
+def iso_date(raw):
+    """Convert YouTube publishedAt (2024-05-10T14:30:00Z) to an ISO string."""
+    if not raw:
+        return None
+    try:
+        dt = datetime.strptime(raw, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return dt.isoformat()
+    except ValueError:
+        return raw
+
+
+def parse_duration(iso):
+    """Convert ISO 8601 duration (PT1H3M12S) -> HH:MM:SS or MM:SS."""
+    if not iso:
+        return "Unknown"
+    m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso)
+    if not m:
+        return iso
+    h, mn, s = (int(x or 0) for x in m.groups())
+    return f"{h}:{mn:02d}:{s:02d}" if h else f"{mn}:{s:02d}"
 
 
 def load_cached_videos_map(filename=OUTPUT_FILE):
@@ -51,12 +79,42 @@ def extract_playlist_id(url):
     return extracted
 
 
-def fetch_videos_for_playlist(playlist_url, existing_ids):
-    """Hits YouTube API, checks for new videos, and breaks early when a duplicate is found."""
+def check_video_category_mismatch(video_title, current_category, playlist_title, playlist_url):
+    """
+    Debug helper: checks whether a video's OWN title matches a category
+    keyword set that is DIFFERENT from the category its containing playlist
+    was filed under. This is exactly how a 'הלכה יומית' video can end up
+    listed inside 'השיעור השבועי' (or vice versa) - the playlist gets
+    categorized by ITS title, but individual videos inside it aren't
+    re-checked, so a stray/misplaced video silently inherits the wrong
+    category.
+    """
+    if not video_title:
+        return
+
+    matches = find_matching_categories(video_title)
+    matched_categories = {c for c, _ in matches}
+
+    if matched_categories and current_category not in matched_categories:
+        print(
+            f"[DEBUG][video-mismatch] ⚠️ Video '{video_title}' looks like it "
+            f"belongs to {sorted(matched_categories)}, but is filed under "
+            f"'{current_category}' because it's inside playlist "
+            f"'{playlist_title}' ({playlist_url})"
+        )
+
+
+def fetch_videos_for_playlist(playlist_url, existing_ids, category=None, playlist_title=None):
+    """
+    Hits YouTube API, checks for new videos, and breaks early when a duplicate
+    is found (incremental update). For every NEW video, also fetches its
+    duration/view_count via a batched videos.list() call, and (in DEBUG mode)
+    checks whether the video's own title suggests it belongs to a different
+    category than the one it was filed under.
+    """
     playlist_id = extract_playlist_id(playlist_url)
     videos = []
     next_page_token = None
-    new_items_count = 0
     should_continue = True
 
     try:
@@ -75,11 +133,12 @@ def fetch_videos_for_playlist(playlist_url, existing_ids):
             if not items:
                 break
 
+            # Figure out which items in this page are genuinely new BEFORE
+            # making the (costlier) batched videos.list() details call.
+            page_new_items = []
             for item in items:
-                snippet = item.get("snippet", {})
                 content_details = item.get("contentDetails", {})
                 video_id = content_details.get("videoId")
-                title = snippet.get("title")
 
                 if video_id in existing_ids:
                     if DEBUG:
@@ -87,19 +146,52 @@ def fetch_videos_for_playlist(playlist_url, existing_ids):
                     should_continue = False
                     break
 
-                new_items_count += 1
-                if DEBUG:
-                    safe_title = title.encode('utf-8', errors='replace').decode('utf-8')
-                    print(f"   [DEBUG NEW ITEM] {safe_title}")
+                page_new_items.append(item)
 
-                videos.append({
-                    "id": video_id,
-                    "title": title,
-                    "url": f"https://www.youtube.com/watch?v={video_id}",
-                    "duration": "Unknown",
-                    "view_count": None,
-                    "upload_date": snippet.get("publishedAt")
-                })
+            if page_new_items:
+                video_ids = [
+                    it["contentDetails"]["videoId"]
+                    for it in page_new_items
+                    if it.get("contentDetails", {}).get("videoId")
+                ]
+
+                details_map = {}
+                if video_ids:
+                    details_resp = youtube.videos().list(
+                        part="contentDetails,statistics",
+                        id=",".join(video_ids),
+                    ).execute()
+                    details_map = {v["id"]: v for v in details_resp.get("items", [])}
+
+                for item in page_new_items:
+                    snippet = item.get("snippet", {})
+                    content_details = item.get("contentDetails", {})
+                    video_id = content_details.get("videoId")
+                    title = snippet.get("title")
+
+                    if DEBUG:
+                        safe_title = (title or "").encode('utf-8', errors='replace').decode('utf-8')
+                        print(f"   [DEBUG NEW ITEM] {safe_title}")
+
+                    if category is not None:
+                        check_video_category_mismatch(title, category, playlist_title, playlist_url)
+
+                    details = details_map.get(video_id, {})
+                    duration_raw = details.get("contentDetails", {}).get("duration", "")
+                    view_count_raw = details.get("statistics", {}).get("viewCount")
+                    thumbnails = snippet.get("thumbnails", {})
+
+                    videos.append({
+                        "id": video_id,
+                        "title": title,
+                        "url": f"https://www.youtube.com/watch?v={video_id}",
+                        "duration": parse_duration(duration_raw),
+                        "view_count": int(view_count_raw) if view_count_raw else None,
+                        "upload_date": iso_date(snippet.get("publishedAt")),
+                        "thumbnail": (
+                            thumbnails.get("medium") or thumbnails.get("default") or {}
+                        ).get("url"),
+                    })
 
             if not should_continue:
                 break
@@ -121,7 +213,7 @@ def enrich_structured_playlists(structured_data, skip_fallback=True):
     a deduplicated list of video objects sorted by upload_date DESC:
 
         {
-            "הלכה יומית": [ {id, title, url, duration, ...}, ... ],
+            "הלכה יומית": [ {id, title, url, duration, view_count, upload_date, thumbnail}, ... ],
             ...
         }
     """
@@ -130,7 +222,6 @@ def enrich_structured_playlists(structured_data, skip_fallback=True):
     print("\nDeep scanning matched playlists for inner videos...")
 
     result = {}
-    _epoch = "1970-01-01T00:00:00+00:00"
 
     for category, playlists in structured_data.items():
         if skip_fallback and category == "אחר":
@@ -149,7 +240,10 @@ def enrich_structured_playlists(structured_data, skip_fallback=True):
             print(f"   -> Scanning: '{playlist_title}'")
 
             old_videos = cached_playlists_map.get(playlist_url, [])
-            new_videos = fetch_videos_for_playlist(playlist_url, existing_ids)
+            new_videos = fetch_videos_for_playlist(
+                playlist_url, existing_ids,
+                category=category, playlist_title=playlist_title,
+            )
 
             for video in (new_videos + old_videos):
                 vid_id = video.get("id")
@@ -159,7 +253,7 @@ def enrich_structured_playlists(structured_data, skip_fallback=True):
 
         # Sort newest-first; videos without a date fall to the bottom
         all_videos.sort(
-            key=lambda v: v.get("upload_date") or _epoch,
+            key=lambda v: v.get("upload_date") or _EPOCH,
             reverse=True,
         )
 
