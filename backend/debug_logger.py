@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 class DebugLogger:
     def __init__(self, log_path: str | None = None):
         if log_path is None:
-            log_path = os.path.join(os.path.dirname(__file__), "debug.log")
+            log_path = "/tmp/debug.log"
         self.log_path = log_path
         self._fh = open(log_path, "a", encoding="utf-8")
         self._write_header()
@@ -256,6 +256,15 @@ class DebugLogger:
                 )
         lines.append(f"{'─' * 72}\n")
         self._write("\n".join(lines))
+
+    def get_log_content(self) -> str:
+        """Return the full log content written so far."""
+        self._fh.flush()
+        try:
+            with open(self.log_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            return ""
 
     def close(self):
         """Flush and close the log file."""

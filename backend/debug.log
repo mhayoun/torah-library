@@ -233,3 +233,153 @@
     • דעת ותורה - הרב אברהם בוטבול  (1 rerouted)
 ────────────────────────────────────────────────────────────────────────
 
+
+========================================================================
+  RUN STARTED  2026-06-25T08:07:01Z
+========================================================================
+[2026-06-25T08:07:05Z] PLAYLIST SUMMARY
+  Playlist : הלכה יומית תשפ"ו
+  URL      : https://www.youtube.com/playlist?list=PLDOEgolnX2-xqOhwwvEDh01f6fxjqSFqP
+  Fetched  : 227 new videos found via API
+  Added    : 227 videos inserted into final output
+  Rerouted : 0 videos moved to a different category
+  Processed: 227 total  ✅ 227 succeeded  ❌ 0 failed
+
+[2026-06-25T08:07:07Z] CATEGORY MISMATCH WARNING
+  Video    : הגאון הרב אהרון בוטבול - השיעור השבועי המרכזי - כ"ד אדר התשפ"ה - חודש ניסן וברכת האילנות
+  Filed as : הלכה יומית
+  Looks like: ['השיעור השבועי']
+  Playlist : הלכה יומית תשפ"ה (https://www.youtube.com/playlist?list=PLDOEgolnX2-zftmHofud7pjevIeXJrck2)
+
+[2026-06-25T08:07:09Z] PLAYLIST SUMMARY
+  Playlist : הלכה יומית תשפ"ה
+  URL      : https://www.youtube.com/playlist?list=PLDOEgolnX2-zftmHofud7pjevIeXJrck2
+  Fetched  : 295 new videos found via API
+  Added    : 294 videos inserted into final output
+  Rerouted : 0 videos moved to a different category
+  Processed: 295 total  ✅ 295 succeeded  ❌ 0 failed
+
+[2026-06-25T08:07:14Z] PLAYLIST SUMMARY
+  Playlist : הלכה יומית תשפ"ד
+  URL      : https://www.youtube.com/playlist?list=PLDOEgolnX2-z6nuBPrOrOnsePpitIC_MX
+  Fetched  : 323 new videos found via API
+  Added    : 323 videos inserted into final output
+  Rerouted : 0 videos moved to a different category
+  Processed: 323 total  ✅ 323 succeeded  ❌ 0 failed
+
+[2026-06-25T08:07:18Z] PLAYLIST SUMMARY
+  Playlist : הלכה יומית תשפ"ג
+  URL      : https://www.youtube.com/playlist?list=PLDOEgolnX2-wGNuSAg90ZSTeQLU8n1NWy
+  Fetched  : 298 new videos found via API
+  Added    : 298 videos inserted into final output
+  Rerouted : 0 videos moved to a different category
+  Processed: 298 total  ✅ 298 succeeded  ❌ 0 failed
+
+[2026-06-25T08:07:20Z] PLAYLIST SUMMARY
+  Playlist : הלכה יומית תשפ"ב
+  URL      : https://www.youtube.com/playlist?list=PLDOEgolnX2-yIQMrF6ItTWaE8x5wr81LB
+  Fetched  : 200 new videos found via API
+  Added    : 200 videos inserted into final output
+  Rerouted : 0 videos moved to a different category
+  Processed: 200 total  ✅ 200 succeeded  ❌ 0 failed
+
+[2026-06-25T08:07:21Z] PLAYLIST SUMMARY
+  Playlist : הרב עובדיה יוסף בוטבול
+  URL      : https://www.youtube.com/playlist?list=PLDOEgolnX2-wMKZ1YhtjWv4OMA_SxAU-T
+  Fetched  : 13 new videos found via API
+  Added    : 13 videos inserted into final output
+  Rerouted : 0 videos moved to a different category
+  Processed: 13 total  ✅ 13 succeeded  ❌ 0 failed
+
+[2026-06-25T08:07:22Z] CATEGORY MISMATCH WARNING
+  Video    : הגאון הרב אהרון בוטבול - הלכה יומית - כ"ה כסלו התשפ"ג
+  Filed as : השיעור השבועי
+  Looks like: ['הלכה יומית']
+  Playlist : השיעור השבועי (https://www.youtube.com/playlist?list=PLDOEgolnX2-xOF2aL29beuC8JX-VaaZRs)
+
+[2026-06-25T08:07:24Z] CATEGORY MISMATCH WARNING
+  Video    : האם מותר להחזיר יין שנשאר בכוס לבקבוק? הלכה יומית מפי הגאון הרב אהרן בוטבול - א' תמוז התשפ"ו
+  Filed as : השיעור השבועי
+  Looks like: ['הלכה יומית']
+  Playlist : השיעור השבועי (https://www.youtube.com/playlist?list=PLDOEgolnX2-xOF2aL29beuC8JX-VaaZRs)
+
+[2026-06-25T08:07:24Z] PLAYLIST SUMMARY
+  Playlist : השיעור השבועי
+  URL      : https://www.youtube.com/playlist?list=PLDOEgolnX2-xOF2aL29beuC8JX-VaaZRs
+  Fetched  : 196 new videos found via API
+  Added    : 186 videos inserted into final output
+  Rerouted : 0 videos moved to a different category
+  Processed: 196 total  ✅ 196 succeeded  ❌ 0 failed
+
+[2026-06-25T08:07:27Z] PLAYLIST SUMMARY
+  Playlist : שיחת חולין הרב בוטבול
+  URL      : https://www.youtube.com/playlist?list=PLPPy6SF11zD_-dW8PU1Br5mPRD8fK91LH
+  Fetched  : 180 new videos found via API
+  Added    : 180 videos inserted into final output
+  Rerouted : 0 videos moved to a different category
+  Processed: 180 total  ✅ 180 succeeded  ❌ 0 failed
+
+[2026-06-25T08:07:30Z] CATEGORY MISMATCH WARNING
+  Video    : הליכות עולם כבוד הרב אהרון בוטבול מקול ברמה פרשת בראשית תשפב 01.10.21 למניינם
+  Filed as : דעת ותורה
+  Looks like: ['הליכות עולם']
+  Playlist : דעת ותורה - הרב אברהם בוטבול (https://www.youtube.com/playlist?list=PLPPy6SF11zD8vCyIog54JrY_mFO-j2bnG)
+
+[2026-06-25T08:07:30Z] PLAYLIST SUMMARY
+  Playlist : דעת ותורה - הרב אברהם בוטבול
+  URL      : https://www.youtube.com/playlist?list=PLPPy6SF11zD8vCyIog54JrY_mFO-j2bnG
+  Fetched  : 244 new videos found via API
+  Added    : 243 videos inserted into final output
+  Rerouted : 0 videos moved to a different category
+  Processed: 244 total  ✅ 244 succeeded  ❌ 0 failed
+
+[2026-06-25T08:07:34Z] PLAYLIST SUMMARY
+  Playlist : הליכות עולם - כבוד הרב בוטבול
+  URL      : https://www.youtube.com/playlist?list=PLPPy6SF11zD8YIS1hqdscDdDPjWcICPPc
+  Fetched  : 261 new videos found via API
+  Added    : 261 videos inserted into final output
+  Rerouted : 0 videos moved to a different category
+  Processed: 261 total  ✅ 261 succeeded  ❌ 0 failed
+
+[2026-06-25T08:07:34Z] CATEGORY REROUTE
+  Video    : הגאון הרב אהרון בוטבול - השיעור השבועי המרכזי - כ"ד אדר התשפ"ה - חודש ניסן וברכת האילנות
+  ID       : HlH7nRDOF0c
+  From     : הלכה יומית
+  To       : השיעור השבועי
+  Playlist : הלכה יומית תשפ"ה (https://www.youtube.com/playlist?list=PLDOEgolnX2-zftmHofud7pjevIeXJrck2)
+
+[2026-06-25T08:07:34Z] CATEGORY REROUTE
+  Video    : הגאון הרב אהרון בוטבול - הלכה יומית - כ"ה כסלו התשפ"ג
+  ID       : pR5W_baSWBE
+  From     : השיעור השבועי
+  To       : הלכה יומית
+  Playlist : השיעור השבועי (https://www.youtube.com/playlist?list=PLDOEgolnX2-xOF2aL29beuC8JX-VaaZRs)
+
+[2026-06-25T08:07:34Z] CATEGORY REROUTE
+  Video    : האם מותר להחזיר יין שנשאר בכוס לבקבוק? הלכה יומית מפי הגאון הרב אהרן בוטבול - א' תמוז התשפ"ו
+  ID       : oAKh7RFl6ME
+  From     : השיעור השבועי
+  To       : הלכה יומית
+  Playlist : השיעור השבועי (https://www.youtube.com/playlist?list=PLDOEgolnX2-xOF2aL29beuC8JX-VaaZRs)
+
+[2026-06-25T08:07:34Z] CATEGORY REROUTE
+  Video    : הליכות עולם כבוד הרב אהרון בוטבול מקול ברמה פרשת בראשית תשפב 01.10.21 למניינם
+  ID       : 2ofo6yg4K2o
+  From     : דעת ותורה
+  To       : הליכות עולם
+  Playlist : דעת ותורה - הרב אברהם בוטבול (https://www.youtube.com/playlist?list=PLPPy6SF11zD8vCyIog54JrY_mFO-j2bnG)
+
+────────────────────────────────────────────────────────────────────────
+[2026-06-25T08:07:34Z] RUN SUMMARY
+  Playlists processed : 10
+  Videos fetched (API): 2237
+  Videos added (total): 2225
+  Videos rerouted     : 4
+  Videos succeeded    : 2237
+  Videos failed       : 0
+  Playlists with rerouted videos:
+    • הלכה יומית תשפ"ה  (1 rerouted)
+    • השיעור השבועי  (2 rerouted)
+    • דעת ותורה - הרב אברהם בוטבול  (1 rerouted)
+────────────────────────────────────────────────────────────────────────
+
