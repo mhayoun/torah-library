@@ -381,3 +381,4 @@ async def debug_sync():
         log(f"\nFATAL: {type(e).__name__}: {e}")
 
     return PlainTextResponse("\n".join(lines))
+# test
