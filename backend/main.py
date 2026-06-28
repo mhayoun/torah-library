@@ -359,7 +359,7 @@ async def debug_sync():
 
             # ── SUMMARY ───────────────────────────────────────────────────
             sep("=")
-            log("SUMMARY")
+            log("SUMMARY-REPORT")
             sep("=")
             if new_count > 0:
                 log(f"  OK — {new_count} new video(s) detected.")
