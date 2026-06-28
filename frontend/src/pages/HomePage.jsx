@@ -1,5 +1,5 @@
-import React from 'react'
-import { BookOpen, ChevronLeft, RefreshCw, Sparkles } from 'lucide-react'
+import React, { useState } from 'react'
+import { BookOpen, ChevronLeft, Loader2, RefreshCw, Sparkles } from 'lucide-react'
 
 const CATEGORY_ICONS = {
   'דעת ותורה':     '📖',
@@ -22,6 +22,13 @@ function formatSync(iso) {
 export default function HomePage({ catalog, onCategorySelect, lastSync, total, newCount }) {
   const entries   = Object.entries(catalog)
   const syncLabel = formatSync(lastSync)
+  const [loadingCat, setLoadingCat] = useState(null)
+
+  const handleSelect = (catName) => {
+    if (loadingCat) return
+    setLoadingCat(catName)
+    setTimeout(() => onCategorySelect(catName), 350)
+  }
 
   return (
     <div style={s.page}>
@@ -68,17 +75,40 @@ export default function HomePage({ catalog, onCategorySelect, lastSync, total, n
 
       {/* ── Category cards ────────────────────────────────────────── */}
       <div style={s.grid}>
-        {entries.map(([catName, videos]) => (
-          <button key={catName} style={s.card} onClick={() => onCategorySelect(catName)}>
-            <div style={s.cardIcon}>{CATEGORY_ICONS[catName] || '📚'}</div>
-            <div style={s.cardInfo}>
-              <h3 style={s.cardName}>{catName}</h3>
-              <p style={s.cardCount}>{videos.length} שיעורים</p>
-            </div>
-            <ChevronLeft size={16} color="#B8860B" style={{ marginRight: 'auto', flexShrink: 0 }} />
-          </button>
-        ))}
+        {entries.map(([catName, videos]) => {
+          const isLoading = loadingCat === catName
+          return (
+            <button
+              key={catName}
+              style={{
+                ...s.card,
+                ...(isLoading ? s.cardLoading : {}),
+                ...(loadingCat && !isLoading ? s.cardDisabled : {}),
+              }}
+              onClick={() => handleSelect(catName)}
+              disabled={!!loadingCat}
+            >
+              <div style={s.cardIcon}>{CATEGORY_ICONS[catName] || '📚'}</div>
+              <div style={s.cardInfo}>
+                <h3 style={s.cardName}>{catName}</h3>
+                <p style={s.cardCount}>{videos.length} שיעורים</p>
+              </div>
+              {isLoading ? (
+                <Loader2 size={16} color="#B8860B" style={{ marginRight: 'auto', flexShrink: 0, animation: 'spin 0.8s linear infinite' }} />
+              ) : (
+                <ChevronLeft size={16} color="#B8860B" style={{ marginRight: 'auto', flexShrink: 0 }} />
+              )}
+            </button>
+          )
+        })}
       </div>
+
+      <style>{`
+        @keyframes spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+      `}</style>
     </div>
   )
 }
@@ -149,6 +179,8 @@ const s = {
   },
   cardIcon:  { fontSize: '1.8rem', flexShrink: 0 },
   cardInfo:  { flex: 1, minWidth: 0 },
+  cardLoading: { opacity: 0.85, cursor: 'default' },
+  cardDisabled: { opacity: 0.5, cursor: 'default' },
   cardName: {
     fontFamily: "'Frank Ruhl Libre', serif",
     fontSize: '1rem', fontWeight: 700, color: '#1C1610', marginBottom: 4,
