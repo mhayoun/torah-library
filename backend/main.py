@@ -4,15 +4,22 @@ main.py
 FastAPI backend for the Rav Aaron Butbul's Torah lessons site.
 
 Endpoints:
-  GET /api/cours   — returns the full catalogue (Redis-cached, 6h TTL)
-                     On cache miss: fetches only NEW videos from YouTube
-                     and merges them with the permanent store.
-  POST /api/sync   — called by the Vercel cron job every 6h (or by a
-                     YouTube PubSubHubbub webhook); invalidates the short
-                     cache so the next visitor triggers a fresh sync.
+  GET /api/cours   — stale-while-revalidate. Returns cours_response if
+                     still fresh (< 6h). If it has expired, serves
+                     straight from the permanent store (cours_full)
+                     instead — no YouTube call, no live sync. Visitors
+                     NEVER trigger a full sync, except on a true cold
+                     start where cours_full itself is empty.
+  POST /api/sync   — called by the Vercel cron job once a day at 6am
+                     (or by a YouTube PubSubHubbub webhook); runs the
+                     actual incremental sync against YouTube and
+                     refreshes both cours_full and cours_response. This
+                     is the ONLY regular source of fresh data.
 
 Redis keys:
-  cours_response   — full JSON response body, TTL = CACHE_TTL (6h)
+  cours_response   — full JSON response body. No TTL: it is only ever
+                     overwritten by POST /api/sync (the daily cron), and
+                     used as a fallback safety-net cache otherwise.
   cours_full       — permanent flat list of ALL video objects (no TTL)
   last_sync_date   — ISO-8601 timestamp of the last successful sync
 
@@ -57,7 +64,6 @@ FULL_SCAN_ONLY_URLS = [
     "https://www.youtube.com/@nissimtrabelsy3957/playlists",
 ]
 
-CACHE_TTL = 6 * 3600  # 6 hours — same as Redis TTL
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -178,7 +184,8 @@ async def _build_response(r) -> dict:
 
     await r.set("cours_full", json.dumps(all_videos))
     await r.set("last_sync_date", now)
-    await r.setex("cours_response", CACHE_TTL, json.dumps(response_body))
+    # No TTL: this is only ever overwritten by the next daily sync.
+    await r.set("cours_response", json.dumps(response_body))
 
     logger.log_run_summary()
     log_content = logger.get_log_content()
@@ -191,12 +198,57 @@ async def _build_response(r) -> dict:
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+async def _response_from_full(r, all_videos: list[dict]) -> dict:
+    """
+    Builds a response body straight from the permanent store (cours_full),
+    with NO call to YouTube. This is only a safety net for the rare case
+    where cours_response is missing (e.g. manually deleted, or a plan-
+    level TTL on the Redis provider) while cours_full is still intact —
+    it should almost never run in normal operation, since cours_response
+    now has no TTL of its own.
+    """
+    catalogue: dict[str, list] = {}
+    for v in all_videos:
+        cat = v.get("category", "אחר")
+        catalogue.setdefault(cat, []).append(v)
+
+    for cat in catalogue:
+        catalogue[cat].sort(
+            key=lambda x: x.get("upload_date") or "",
+            reverse=True,
+        )
+
+    last_sync = await r.get("last_sync_date")
+    response_body = {
+        "catalog": catalogue,
+        "total": len(all_videos),
+        "new": 0,
+        "last_sync": last_sync,
+    }
+
+    # Re-cache it (no TTL) so this rebuild doesn't have to happen again
+    # until the next real sync overwrites it.
+    await r.set("cours_response", json.dumps(response_body))
+
+    return response_body
+
+
 @app.get("/api/cours")
 async def get_cours():
     """
     Main endpoint consumed by the React frontend.
-    Returns immediately from Redis cache if fresh (< 6h).
-    On cache miss, triggers a full incremental sync.
+
+    Stale-while-revalidate:
+      - cours_response exists -> return it directly (this is the normal
+        case: it has no TTL, so it's always there once a sync has run).
+      - cours_response is missing (rare — see _response_from_full) but
+        cours_full has data -> rebuild it straight from cours_full (no
+        YouTube calls, no live sync). The catalogue itself is only ever
+        refreshed for real by the Vercel cron job hitting POST /api/sync
+        once a day at 6am — visitors never trigger a full sync.
+      - cours_full is ALSO empty (true cold start, e.g. first deploy or
+        a wiped Redis) -> nothing to serve at all, so we fall back to a
+        real sync just this once so the site isn't blank.
     """
     try:
         r = await get_redis()
@@ -204,6 +256,13 @@ async def get_cours():
             cached = await r.get("cours_response")
             if cached:
                 return json.loads(cached)
+
+            full_raw = await r.get("cours_full")
+            if full_raw:
+                return await _response_from_full(r, json.loads(full_raw))
+
+            # True cold start: no cached response AND no permanent store.
+            # This is the only case where a request can trigger a live sync.
             return await _build_response(r)
         finally:
             await r.aclose()
@@ -214,14 +273,13 @@ async def get_cours():
 @app.post("/api/sync")
 async def force_sync():
     """
-    Called by the Vercel cron job every 6h, or by a YouTube PubSubHubbub
+    Called by the Vercel cron job once a day at 6am, or by a YouTube PubSubHubbub
     webhook when a new video is published.
-    Invalidates the short-lived cache so the next GET /api/cours triggers
-    a fresh incremental sync.
+    Runs the real incremental sync against YouTube and overwrites
+    cours_full / cours_response with fresh data.
     """
     r = await get_redis()
     try:
-        await r.delete("cours_response")
         result = await _build_response(r)
         return {
             "status": "sync complete",
@@ -242,10 +300,8 @@ async def status():
             last_sync = await r.get("last_sync_date")
             full_raw = await r.get("cours_full")
             total = len(json.loads(full_raw)) if full_raw else 0
-            ttl = await r.ttl("cours_response")
             return {
                 "cache_active": bool(has_cache),
-                "cache_ttl_seconds": ttl if ttl > 0 else None,
                 "last_sync": last_sync,
                 "total_videos": total,
             }
