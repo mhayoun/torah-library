@@ -161,6 +161,32 @@ async def _build_response(r) -> dict:
         if not v.get("hebraic_year"):
             v["hebraic_year"] = extract_hebraic_year(title) or extract_hebraic_year(v.get("playlist", ""))
 
+    # 5b. Auto-attach Hebrew transcript + AI topic markers (keyword + start
+    #     position) for newly-added הלכה יומית videos only. Existing videos
+    #     that predate this feature are handled separately by
+    #     backfill_halacha_transcripts.py, so this stays fast and can't
+    #     make the daily sync run away on a big backfill.
+    new_ids = fresh_ids - existing_ids
+    if new_ids:
+        from halacha_transcripts import HALACHA_CATEGORY, process_video_transcript
+        new_halacha_videos = [
+            v for v in all_videos
+            if v.get("id") in new_ids and v.get("category") == HALACHA_CATEGORY
+        ]
+        if new_halacha_videos:
+            max_auto = int(os.environ.get("MAX_AUTO_TRANSCRIPTS", "5"))
+            print(f"[transcript] {len(new_halacha_videos)} new {HALACHA_CATEGORY} video(s) "
+                  f"this sync — processing up to {max_auto}")
+            for v in new_halacha_videos[:max_auto]:
+                try:
+                    process_video_transcript(v, logger=True)
+                except Exception as e:
+                    print(f"[transcript] unexpected failure for {v.get('id')}: {e}")
+            skipped = len(new_halacha_videos) - max_auto
+            if skipped > 0:
+                print(f"[transcript] {skipped} video(s) deferred — run "
+                      f"backfill_halacha_transcripts.py to catch up.")
+
     # Rebuild catalogue from the full merged flat list
     catalogue: dict[str, list] = {}
     for v in all_videos:
