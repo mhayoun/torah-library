@@ -31,6 +31,29 @@ class NoHebrewTranscript(Exception):
     derived (manual, auto-generated, or translated) for a given video."""
 
 
+class TranscriptFetchBlocked(Exception):
+    """
+    Raised when YouTube is rate-limiting/blocking transcript requests
+    from this IP (youtube-transcript-api's RequestBlocked/IpBlocked, or
+    equivalent text in the error, depending on library version). This is
+    a machine-level condition — NOT a problem with any particular
+    video's captions — so it will fail identically for every subsequent
+    video too. Callers should stop the current run rather than burning
+    through the rest of the batch (which only makes the block worse) and
+    should NOT record this as a per-video error.
+    """
+
+
+def _is_blocked_error(e: Exception) -> bool:
+    """Cross-version detection: newer youtube-transcript-api releases use
+    a RequestBlocked/IpBlocked exception class, but the class name and
+    hierarchy have changed between versions, so matching on the (stable)
+    message text is the more reliable signal here."""
+    name = type(e).__name__
+    text = str(e)
+    return "Blocked" in name or "blocking requests from your IP" in text
+
+
 def _list_transcripts(video_id):
     """
     Version-agnostic wrapper around transcript-list enumeration.
@@ -141,6 +164,20 @@ def fetch_hebrew_transcript(video_id: str):
         raise NoHebrewTranscript(f"Captions are disabled for video {video_id}")
     except VideoUnavailable:
         raise NoHebrewTranscript(f"Video {video_id} is unavailable")
+    except Exception as e:
+        if _is_blocked_error(e):
+            raise TranscriptFetchBlocked(
+                f"YouTube is blocking transcript requests from this IP "
+                f"(hit while fetching {video_id}). This isn't specific to "
+                f"this video — every other video will fail the same way "
+                f"right now. See 'Working around IP bans' in the "
+                f"youtube-transcript-api README: "
+                f"https://github.com/jdepoix/youtube-transcript-api"
+                f"?tab=readme-ov-file#working-around-ip-bans-requestblocked-or-ipblocked-exception "
+                f"— usually means waiting a while, or routing through a "
+                f"proxy/residential IP. Original error: {e}"
+            ) from e
+        raise
 
     if raw is None:
         try:
@@ -152,6 +189,22 @@ def fetch_hebrew_transcript(video_id: str):
         except VideoUnavailable:
             raise NoHebrewTranscript(f"Video {video_id} is unavailable")
         except Exception as e:
+            if _is_blocked_error(e):
+                raise TranscriptFetchBlocked(
+                    f"YouTube is blocking transcript requests from this IP "
+                    f"(hit while fetching {video_id}). This isn't specific "
+                    f"to this video — every other video will fail the same "
+                    f"way right now. See 'Working around IP bans' in the "
+                    f"youtube-transcript-api README: "
+                    f"https://github.com/jdepoix/youtube-transcript-api"
+                    f"?tab=readme-ov-file#working-around-ip-bans-requestblocked-or-ipblocked-exception "
+                    f"— usually means waiting a while, or routing through a "
+                    f"proxy/residential IP. Original error: {e}"
+                ) from e
+            # NOTE: intentionally NOT TranscriptFetchBlocked here — an
+            # unrecognized error genuinely could be specific to this video
+            # (malformed captions, etc.), so it's still reported as
+            # NoHebrewTranscript rather than assumed to be a global block.
             raise NoHebrewTranscript(f"Failed to fetch transcript for {video_id}: {e}")
 
     segments = _normalize(raw)

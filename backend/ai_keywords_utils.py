@@ -1,20 +1,27 @@
 """
 ai_keywords_utils.py
 ---------------------
-Uses the Google Gemini API (free tier) to read a Hebrew הלכה יומית
-transcript (with per-segment timestamps) and extract the distinct
-halachic subjects discussed, each anchored to a start-time position in
-seconds — this is what lets the frontend jump straight to that part of
-the video.
+Uses an LLM to read a Hebrew הלכה יומית transcript (with per-segment
+timestamps) and extract the distinct halachic subjects discussed, each
+anchored to a start-time position in seconds — this is what lets the
+frontend jump straight to that part of the video.
 
-Requires GEMINI_API_KEY to be set in the environment (.env). Get a free
-key (no credit card required) at https://aistudio.google.com/apikey —
-current free-tier quotas are listed at https://ai.google.dev/gemini-api/docs/pricing
-and can change, so it's worth a quick check there if you start seeing
-429 rate-limit errors.
-
+Primary provider: Google Gemini (free tier). Requires GEMINI_API_KEY in
+the environment (.env). Get a free key (no credit card required) at
+https://aistudio.google.com/apikey — current free-tier quotas are listed
+at https://ai.google.dev/gemini-api/docs/pricing and can change, so it's
+worth a quick check there if you start seeing 429 rate-limit errors.
 Uses the current Google GenAI SDK (`google-genai` package, `from google
 import genai`) — the older `google-generativeai` package is deprecated.
+
+Fallback provider: Groq (optional). If GEMINI_API_KEY hits a 429 quota
+block (see QuotaExhaustedError) AND GROQ_API_KEY is set in the
+environment, extract_topics() automatically retries the same request on
+Groq instead of failing the video. Get a free key at
+https://console.groq.com/keys. Override the model with GROQ_MODEL in
+.env (default: llama-3.3-70b-versatile). If GROQ_API_KEY isn't set, the
+original Gemini QuotaExhaustedError is raised as before — Groq is purely
+an optional safety net, not a replacement.
 """
 
 import os
@@ -22,6 +29,11 @@ import json
 import re
 
 from google import genai
+
+try:
+    from groq import Groq
+except ImportError:  # groq is an optional dependency — only needed if
+    Groq = None       # GROQ_API_KEY is actually configured as a fallback.
 
 # GEMINI_MODEL in .env always wins if set (e.g. GEMINI_MODEL=gemini-2.5-flash-lite
 # for higher free-tier request-per-day headroom at slightly lower quality).
@@ -32,17 +44,22 @@ from google import genai
 _MODEL_OVERRIDE = os.environ.get("GEMINI_MODEL")
 _discovered_model = None
 
+# Groq is only used as a fallback when Gemini's quota is exhausted, so
+# there's no auto-discovery dance — just a sane, fast, JSON-mode-capable
+# default that can be overridden.
+_GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+
 
 class QuotaExhaustedError(RuntimeError):
     """
-    Raised when Gemini returns 429 RESOURCE_EXHAUSTED. This is an
-    account/project-level condition (free-tier quota set to 0, billing
-    not linked, or a genuine rate limit) — NOT a problem with any
-    particular video's transcript. Callers should stop processing
-    further videos in the current run rather than retrying each one
-    (they'll all fail identically) and should NOT record this as a
-    per-video "error", since that would misleadingly suggest something
-    is wrong with that specific video.
+    Raised when Gemini returns 429 RESOURCE_EXHAUSTED and no working
+    fallback (Groq) was available either. This is an account/project-level
+    condition (free-tier quota set to 0, billing not linked, or a genuine
+    rate limit) — NOT a problem with any particular video's transcript.
+    Callers should stop processing further videos in the current run
+    rather than retrying each one (they'll all fail identically) and
+    should NOT record this as a per-video "error", since that would
+    misleadingly suggest something is wrong with that specific video.
     """
     pass
 
@@ -62,6 +79,25 @@ def _get_client():
             raise RuntimeError("GEMINI_API_KEY is not set")
         _client = genai.Client(api_key=api_key)
     return _client
+
+
+_groq_client = None
+
+
+def _get_groq_client():
+    """
+    Returns a Groq client, or None if GROQ_API_KEY isn't set / the groq
+    package isn't installed — callers treat None as "no fallback
+    available" rather than raising, since Groq is optional.
+    """
+    global _groq_client
+    if _groq_client is not None:
+        return _groq_client
+    api_key = os.environ.get("GROQ_API_KEY")
+    if not api_key or Groq is None:
+        return None
+    _groq_client = Groq(api_key=api_key)
+    return _groq_client
 
 
 def _pick_best_model(candidates: list) -> str:
@@ -163,58 +199,16 @@ _SYSTEM_PROMPT = """אתה מנתח תמלול של שיעור "הלכה יומ�
 """
 
 
-def extract_topics(title: str, segments: list) -> list:
+def _parse_topics_response(raw_text: str, video_duration: float) -> list:
     """
-    Calls Gemini to extract {keyword, start} topic markers from a Hebrew
-    transcript. Returns a list of dicts, sorted by start time ascending:
-      [{"keyword": str, "start": float}, ...]
-    Returns [] if segments is empty or the model output can't be parsed.
+    Shared cleanup/parsing for both providers' raw text output into
+    [{"keyword": str, "start": float}, ...], sorted by start time.
+    Returns [] if the output can't be parsed as the expected JSON shape.
     """
-    if not segments:
-        return []
-
-    transcript_block = _build_timestamped_transcript(segments)
-    last = segments[-1]
-    video_duration = last["start"] + last.get("duration", 0)
-
-    user_content = (
-        f"כותרת השיעור: {title}\n\n"
-        f"אורך השיעור בקירוב: {int(video_duration)} שניות\n\n"
-        f"תמלול עם חותמות זמן:\n{transcript_block}"
-    )
-
-    client = _get_client()
-    try:
-        response = client.models.generate_content(
-            model=_discover_model(),
-            contents=user_content,
-            config={
-                "system_instruction": _SYSTEM_PROMPT,
-                "response_mime_type": "application/json",
-                "temperature": 0.2,
-            },
-        )
-    except Exception as e:
-        code = getattr(e, "code", None)
-        text = str(e)
-        if code == 429 or "RESOURCE_EXHAUSTED" in text or "429" in text[:20]:
-            raise QuotaExhaustedError(
-                "Gemini API quota exhausted (429 RESOURCE_EXHAUSTED). If the "
-                "error mentions 'free_tier_requests, limit: 0', that means "
-                "this API key's project has no free-tier quota granted at "
-                "all — retrying won't help. Check your plan/billing at "
-                "https://aistudio.google.com/apikey and current usage at "
-                "https://ai.dev/rate-limit; linking a billing account "
-                "usually unlocks quota within minutes. If it's a genuine "
-                "rate limit instead (a nonzero limit you've temporarily "
-                "used up), just wait and re-run."
-            ) from e
-        raise
-
-    raw_text = (response.text or "").strip()
+    raw_text = (raw_text or "").strip()
 
     # Defensive cleanup in case the model wraps the JSON in a code fence
-    # despite response_mime_type=application/json.
+    # despite being asked for raw JSON.
     raw_text = re.sub(r"^```(json)?", "", raw_text).strip()
     raw_text = re.sub(r"```$", "", raw_text).strip()
 
@@ -243,3 +237,92 @@ def extract_topics(title: str, segments: list) -> list:
 
     cleaned.sort(key=lambda x: x["start"])
     return cleaned
+
+
+def _call_gemini(user_content: str) -> str:
+    """Returns raw text output, or raises QuotaExhaustedError on a 429."""
+    client = _get_client()
+    try:
+        response = client.models.generate_content(
+            model=_discover_model(),
+            contents=user_content,
+            config={
+                "system_instruction": _SYSTEM_PROMPT,
+                "response_mime_type": "application/json",
+                "temperature": 0.2,
+            },
+        )
+    except Exception as e:
+        code = getattr(e, "code", None)
+        text = str(e)
+        if code == 429 or "RESOURCE_EXHAUSTED" in text or "429" in text[:20]:
+            raise QuotaExhaustedError(
+                "Gemini API quota exhausted (429 RESOURCE_EXHAUSTED). If the "
+                "error mentions 'free_tier_requests, limit: 0', that means "
+                "this API key's project has no free-tier quota granted at "
+                "all — retrying won't help. Check your plan/billing at "
+                "https://aistudio.google.com/apikey and current usage at "
+                "https://ai.dev/rate-limit; linking a billing account "
+                "usually unlocks quota within minutes. If it's a genuine "
+                "rate limit instead (a nonzero limit you've temporarily "
+                "used up), just wait and re-run."
+            ) from e
+        raise
+    return response.text
+
+
+def _call_groq(user_content: str) -> str:
+    """Returns raw text output from the Groq fallback model."""
+    client = _get_groq_client()
+    response = client.chat.completions.create(
+        model=_GROQ_MODEL,
+        messages=[
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user", "content": user_content},
+        ],
+        response_format={"type": "json_object"},
+        temperature=0.2,
+    )
+    return response.choices[0].message.content
+
+
+def extract_topics(title: str, segments: list) -> list:
+    """
+    Calls Gemini (primary) — or Groq as an automatic fallback if Gemini's
+    quota is exhausted and GROQ_API_KEY is configured — to extract
+    {keyword, start} topic markers from a Hebrew transcript. Returns a
+    list of dicts, sorted by start time ascending:
+      [{"keyword": str, "start": float}, ...]
+    Returns [] if segments is empty or the model output can't be parsed.
+    Raises QuotaExhaustedError if Gemini's quota is exhausted and either
+    no Groq fallback is configured, or the Groq call also fails.
+    """
+    if not segments:
+        return []
+
+    transcript_block = _build_timestamped_transcript(segments)
+    last = segments[-1]
+    video_duration = last["start"] + last.get("duration", 0)
+
+    user_content = (
+        f"כותרת השיעור: {title}\n\n"
+        f"אורך השיעור בקירוב: {int(video_duration)} שניות\n\n"
+        f"תמלול עם חותמות זמן:\n{transcript_block}"
+    )
+
+    try:
+        raw_text = _call_gemini(user_content)
+    except QuotaExhaustedError as quota_err:
+        groq_client = _get_groq_client()
+        if groq_client is None:
+            raise  # no fallback configured — surface the original error
+        print(f"[ai_keywords_utils] ⚠️  Gemini quota exhausted — "
+              f"falling back to Groq ({_GROQ_MODEL})")
+        try:
+            raw_text = _call_groq(user_content)
+        except Exception as groq_err:
+            print(f"[ai_keywords_utils] ❌ Groq fallback also failed "
+                  f"({type(groq_err).__name__}: {groq_err})")
+            raise quota_err from groq_err
+
+    return _parse_topics_response(raw_text, video_duration)

@@ -226,6 +226,7 @@ async def _build_response(r) -> dict:
     if new_ids:
         from halacha_transcripts import HALACHA_CATEGORY, process_video_transcript
         from ai_keywords_utils import QuotaExhaustedError
+        from transcript_utils import TranscriptFetchBlocked
         new_halacha_videos = [
             v for v in all_videos
             if v.get("id") in new_ids and v.get("category") == HALACHA_CATEGORY
@@ -237,7 +238,7 @@ async def _build_response(r) -> dict:
             for v in new_halacha_videos[:max_auto]:
                 try:
                     process_video_transcript(v, logger=True)
-                except QuotaExhaustedError as e:
+                except (QuotaExhaustedError, TranscriptFetchBlocked) as e:
                     print(f"[transcript] {e}\n[transcript] stopping early — "
                           f"remaining video(s) this sync would fail the same way.")
                     break

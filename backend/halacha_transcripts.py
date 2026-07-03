@@ -21,7 +21,7 @@ small):
 
 from datetime import datetime, timezone
 
-from transcript_utils import fetch_hebrew_transcript, NoHebrewTranscript
+from transcript_utils import fetch_hebrew_transcript, NoHebrewTranscript, TranscriptFetchBlocked
 from ai_keywords_utils import extract_topics, QuotaExhaustedError
 
 HALACHA_CATEGORY = "הלכה יומית"
@@ -55,6 +55,12 @@ def process_video_transcript(video: dict, logger=None) -> bool:
         if logger:
             print(f"   ⚠️  No Hebrew captions for '{title}' ({vid_id}): {e}")
         return False
+    except TranscriptFetchBlocked:
+        # IP-level block, not this video's fault — don't write a
+        # misleading transcript_error onto it, and definitely don't mark
+        # it "no_captions" (it may well have captions; we just couldn't
+        # reach YouTube right now). Let the caller decide to stop the batch.
+        raise
     except Exception as e:
         video["transcript_status"] = "error"
         video["transcript_error"] = str(e)

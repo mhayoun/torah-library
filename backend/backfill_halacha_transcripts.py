@@ -30,6 +30,7 @@ from redis.exceptions import RedisError
 from main import get_redis, _response_from_full
 from halacha_transcripts import HALACHA_CATEGORY, needs_transcript, process_video_transcript
 from ai_keywords_utils import _discover_model, QuotaExhaustedError
+from transcript_utils import TranscriptFetchBlocked
 
 
 async def _connect_with_retry(attempts: int = 3, delay: float = 2.0):
@@ -93,7 +94,7 @@ async def run(limit: int, dry_run: bool):
         print(f"Processing {len(batch)} video(s) (limit={limit}, dry_run={dry_run})...\n")
 
         done = 0
-        quota_hit = False
+        stopped_early = False
         for i, video in enumerate(batch, 1):
             print(f"[{i}/{len(batch)}] {video.get('title')}  ({video.get('id')})")
             if dry_run:
@@ -106,7 +107,15 @@ async def run(limit: int, dry_run: bool):
                       f"fail the same way. Fix the quota/billing issue above, "
                       f"then just re-run the script; it picks up where it "
                       f"left off.")
-                quota_hit = True
+                stopped_early = True
+                break
+            except TranscriptFetchBlocked as e:
+                print(f"\n🛑 {e}\n\nStopping this run early — the remaining "
+                      f"{len(batch) - i + 1} video(s) in this batch would "
+                      f"fail the same way. Wait a while (or fix the IP-ban "
+                      f"issue above), then just re-run the script; it picks "
+                      f"up where it left off.")
+                stopped_early = True
                 break
             if ok:
                 done += 1
@@ -118,13 +127,13 @@ async def run(limit: int, dry_run: bool):
         # cours_full holds these same (mutated) video dicts, so saving it
         # persists everything; then rebuild cours_response so the change
         # is visible to the frontend too, without waiting for tomorrow's
-        # sync to overwrite it. Save even on an early quota-hit exit so
+        # sync to overwrite it. Save even on an early-stop exit so
         # whatever succeeded before the block isn't lost.
         await r.set("cours_full", json.dumps(all_videos, ensure_ascii=False))
         await _response_from_full(r, all_videos)
 
-        if quota_hit:
-            print(f"\n{done} video(s) saved before hitting the quota block.")
+        if stopped_early:
+            print(f"\n{done} video(s) saved before stopping early.")
             return
 
         print(f"\nDone. {done}/{len(batch)} video(s) successfully processed and saved.")
