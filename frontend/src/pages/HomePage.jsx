@@ -36,7 +36,7 @@ function formatDuration(ms, source) {
 }
 
 export default function HomePage({
-  catalog, allVideos = [], categories = [], years = [],
+  catalog, allVideos = [], categories = [], years = [], keywords = [],
   onCategorySelect, onSearch, lastSync, total, newCount,
   fetchMs, fetchSource,
 }) {
@@ -89,13 +89,20 @@ export default function HomePage({
           <div style={s.searchInputWrap}>
             <input
               type="text"
-              placeholder="חיפוש לפי כותרת…"
+              placeholder="חיפוש לפי כותרת או לפי נושא בתוך השיעור…"
               value={query}
               onChange={e => setQuery(e.target.value)}
               onKeyDown={handleSearchKey}
               style={s.searchInput}
               dir="rtl"
+              list="home-keyword-suggestions"
+              autoComplete="off"
             />
+            {/* Same keyword listbox as SearchPage, sourced from the
+                backend's /api/keywords (see useKeywords.js). */}
+            <datalist id="home-keyword-suggestions">
+              {keywords.map(k => <option key={k} value={k} />)}
+            </datalist>
           </div>
           <div style={s.searchSelectWrap}>
             <select value={category} onChange={e => setCategory(e.target.value)} style={s.searchSelect}>

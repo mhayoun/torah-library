@@ -6,7 +6,7 @@ from main import get_redis
 
 async def wipe():
     r = await get_redis()
-    await r.delete('cours_full', 'cours_response', 'last_sync_date', 'last_debug_log')
+    await r.delete('cours_full', 'cours_response', 'last_sync_date', 'last_debug_log', 'keywords_list')
     print('Wiped.')
     await r.aclose()
 

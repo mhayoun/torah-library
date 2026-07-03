@@ -31,6 +31,32 @@ class NoHebrewTranscript(Exception):
     derived (manual, auto-generated, or translated) for a given video."""
 
 
+def _list_transcripts(video_id):
+    """
+    Version-agnostic wrapper around transcript-list enumeration.
+      - youtube-transcript-api < 1.0  : classmethod YouTubeTranscriptApi.list_transcripts(video_id)
+      - youtube-transcript-api >= 1.0 : instance method YouTubeTranscriptApi().list(video_id)
+        (>= 1.2.0 removed the old classmethod entirely, so hasattr is the
+        reliable way to pick the right call rather than try/except
+        AttributeError, which can mask real errors from inside the call.)
+    """
+    if hasattr(YouTubeTranscriptApi, "list_transcripts"):
+        return YouTubeTranscriptApi.list_transcripts(video_id)
+    return YouTubeTranscriptApi().list(video_id)
+
+
+def _get_transcript_direct(video_id, languages):
+    """
+    Version-agnostic wrapper around the "just get me the transcript"
+    shortcut.
+      - youtube-transcript-api < 1.0  : classmethod YouTubeTranscriptApi.get_transcript(...)
+      - youtube-transcript-api >= 1.0 : instance method YouTubeTranscriptApi().fetch(...)
+    """
+    if hasattr(YouTubeTranscriptApi, "get_transcript"):
+        return YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+    return YouTubeTranscriptApi().fetch(video_id, languages=languages)
+
+
 def _normalize(raw_segments):
     """Normalizes whatever the library returned into a plain list of
     {"text": str, "start": float, "duration": float} dicts."""
@@ -64,7 +90,7 @@ def _fetch_via_transcript_list(video_id):
     Hebrew match — manually created first, then auto-generated, then
     (last resort) any track machine-translated into Hebrew.
     """
-    transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+    transcript_list = _list_transcripts(video_id)
 
     try:
         t = transcript_list.find_manually_created_transcript(HEBREW_LANG_CODES)
@@ -104,16 +130,11 @@ def fetch_hebrew_transcript(video_id: str):
     """
     raw = None
 
-    # Fast path: works on the widely-deployed <1.0 versions of the library.
+    # Fast path: works across both the classmethod-based (<1.0) and
+    # instance-based (>=1.0) versions of the library — see
+    # _get_transcript_direct.
     try:
-        raw = YouTubeTranscriptApi.get_transcript(video_id, languages=HEBREW_LANG_CODES)
-    except AttributeError:
-        # 1.x releases replaced the classmethod with an instance API.
-        try:
-            api = YouTubeTranscriptApi()
-            raw = api.fetch(video_id, languages=HEBREW_LANG_CODES)
-        except Exception:
-            raw = None
+        raw = _get_transcript_direct(video_id, HEBREW_LANG_CODES)
     except NoTranscriptFound:
         raw = None
     except TranscriptsDisabled:

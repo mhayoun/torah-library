@@ -4,17 +4,23 @@ main.py
 FastAPI backend for the Rav Aaron Butbul's Torah lessons site.
 
 Endpoints:
-  GET /api/cours   — stale-while-revalidate. Returns cours_response if
+  GET /api/cours    — stale-while-revalidate. Returns cours_response if
                      still fresh (< 6h). If it has expired, serves
                      straight from the permanent store (cours_full)
                      instead — no YouTube call, no live sync. Visitors
                      NEVER trigger a full sync, except on a true cold
                      start where cours_full itself is empty.
-  POST /api/sync   — called by the Vercel cron job once a day at 6am
+  GET /api/keywords — returns the distinct, sorted list of AI-extracted
+                     topic keywords ({"keywords": [...]}), read straight
+                     from the keywords_list Redis key. Lets the frontend
+                     populate a search suggestions listbox without
+                     downloading/scanning the whole catalogue.
+  POST /api/sync    — called by the Vercel cron job once a day at 6am
                      (or by a YouTube PubSubHubbub webhook); runs the
                      actual incremental sync against YouTube and
-                     refreshes both cours_full and cours_response. This
-                     is the ONLY regular source of fresh data.
+                     refreshes cours_full, cours_response and
+                     keywords_list. This is the ONLY regular source of
+                     fresh data.
 
 Redis keys:
   cours_response   — full JSON response body. No TTL: it is only ever
@@ -22,6 +28,13 @@ Redis keys:
                      used as a fallback safety-net cache otherwise.
   cours_full       — permanent flat list of ALL video objects (no TTL)
   last_sync_date   — ISO-8601 timestamp of the last successful sync
+  keywords_list    — sorted JSON array of every distinct AI-extracted
+                     topic keyword (video["topics"][*]["keyword"]) across
+                     all videos. No TTL. Rebuilt any time cours_response
+                     is rebuilt (sync, cold-start fallback, or the
+                     transcript backfill script), so the frontend can
+                     fetch it cheaply via GET /api/keywords instead of
+                     deriving it client-side from the full catalogue.
 
 Environment variables (set in Vercel or .env):
   YOUTUBE_API_KEY
@@ -84,6 +97,32 @@ async def get_redis():
     if not url:
         raise HTTPException(status_code=500, detail="REDIS_URL not configured")
     return await aioredis.from_url(url, decode_responses=True)
+
+
+def _extract_keywords(all_videos: list[dict]) -> list[str]:
+    """
+    Collects every distinct AI-extracted topic keyword
+    (video["topics"][*]["keyword"]) across all videos, deduplicated and
+    sorted alphabetically. This is what powers the frontend's search
+    keyword listbox — computing it here (once, server-side) means the
+    frontend never has to walk the full video catalogue itself just to
+    populate a suggestions list.
+    """
+    seen: set[str] = set()
+    for v in all_videos:
+        for t in (v.get("topics") or []):
+            kw = (t.get("keyword") or "").strip()
+            if kw:
+                seen.add(kw)
+    return sorted(seen)
+
+
+async def _save_keywords_list(r, all_videos: list[dict]) -> list[str]:
+    """Computes the distinct keyword list and persists it to Redis
+    (no TTL — refreshed alongside cours_response). Returns the list."""
+    keywords = _extract_keywords(all_videos)
+    await r.set("keywords_list", json.dumps(keywords, ensure_ascii=False))
+    return keywords
 
 
 # ── Core sync logic ───────────────────────────────────────────────────────────
@@ -212,6 +251,7 @@ async def _build_response(r) -> dict:
     await r.set("last_sync_date", now)
     # No TTL: this is only ever overwritten by the next daily sync.
     await r.set("cours_response", json.dumps(response_body))
+    await _save_keywords_list(r, all_videos)
 
     logger.log_run_summary()
     log_content = logger.get_log_content()
@@ -255,6 +295,7 @@ async def _response_from_full(r, all_videos: list[dict]) -> dict:
     # Re-cache it (no TTL) so this rebuild doesn't have to happen again
     # until the next real sync overwrites it.
     await r.set("cours_response", json.dumps(response_body))
+    await _save_keywords_list(r, all_videos)
 
     return response_body
 
@@ -290,6 +331,35 @@ async def get_cours():
             # True cold start: no cached response AND no permanent store.
             # This is the only case where a request can trigger a live sync.
             return await _build_response(r)
+        finally:
+            await r.aclose()
+    except Exception as e:
+        return {"error": str(e), "type": type(e).__name__}
+
+
+@app.get("/api/keywords")
+async def get_keywords():
+    """
+    Returns the distinct, sorted list of AI-extracted topic keywords for
+    the frontend's search suggestions listbox: { "keywords": [...] }.
+
+    Reads straight from the keywords_list Redis key (kept fresh by every
+    sync / rebuild — see _save_keywords_list), so this is a cheap lookup
+    with no YouTube calls and no need to walk the full catalogue. If it's
+    somehow missing (e.g. very first deploy before any sync has run), it
+    falls back to deriving it from cours_full and caching the result.
+    """
+    try:
+        r = await get_redis()
+        try:
+            cached = await r.get("keywords_list")
+            if cached:
+                return {"keywords": json.loads(cached)}
+
+            full_raw = await r.get("cours_full")
+            all_videos = json.loads(full_raw) if full_raw else []
+            keywords = await _save_keywords_list(r, all_videos)
+            return {"keywords": keywords}
         finally:
             await r.aclose()
     except Exception as e:

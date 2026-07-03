@@ -4,6 +4,7 @@ import HomePage     from './pages/HomePage.jsx'
 import CategoryPage from './pages/CategoryPage.jsx'
 import SearchPage   from './pages/SearchPage.jsx'
 import { useVideos } from './hooks/useVideos.js'
+import { useKeywords } from './hooks/useKeywords.js'
 import { dlog } from './utils/debug.js'
 
 export default function App() {
@@ -12,6 +13,8 @@ export default function App() {
     loading, error, lastSync, total, newCount,
     fetchMs, fetchSource,
   } = useVideos()
+
+  const { keywords } = useKeywords()
 
   const [activeTab, setActiveTab]   = useState('כל הקטגוריות')
   const [searchInit, setSearchInit] = useState(null)
@@ -47,6 +50,7 @@ export default function App() {
           allVideos={allVideos}
           categories={categories}
           years={years}
+          keywords={keywords}
           initialParams={searchInit}
         />
       )
@@ -58,6 +62,7 @@ export default function App() {
           allVideos={allVideos}
           categories={categories}
           years={years}
+          keywords={keywords}
           onCategorySelect={setActiveTab}
           onSearch={handleHomeSearch}
           lastSync={lastSync}

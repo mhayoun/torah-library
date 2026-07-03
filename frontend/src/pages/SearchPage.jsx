@@ -6,7 +6,7 @@ import { dlog } from '../utils/debug.js'
 const ALL_LABEL = 'כל הקטגוריות'
 const ALL_YEARS = 'כל השנים'
 
-export default function SearchPage({ allVideos, categories, years, initialParams }) {
+export default function SearchPage({ allVideos, categories, years, keywords = [], initialParams }) {
   const [query, setQuery]       = useState(initialParams?.query || '')
   const [category, setCategory] = useState(initialParams?.category || ALL_LABEL)
   const [year, setYear]         = useState(initialParams?.year || ALL_YEARS)
@@ -43,18 +43,38 @@ export default function SearchPage({ allVideos, categories, years, initialParams
 
   const results = useMemo(() => {
     if (!searched) return []
-    const r = allVideos.filter(v => {
-      const matchQuery = !query.trim() ||
-        v.title.includes(query) ||
-        v.playlist?.includes(query) ||
-        v.category?.includes(query)
-      const matchCat  = category === ALL_LABEL || v.category === category
-      const matchYear = year === ALL_YEARS || v.hebraic_year === year
-      return matchQuery && matchCat && matchYear
-    })
+    const q = query.trim()
+    const r = allVideos
+      .map(v => {
+        // Topics (keyword + start position) only exist on הלכה יומית videos
+        // that have been processed by the backend's transcript pipeline.
+        // A "topic match" is what lets us jump straight into the video at
+        // the moment that subject is discussed, instead of just finding
+        // the video by its title.
+        const topicMatches = (q && Array.isArray(v.topics))
+          ? v.topics.filter(t => t.keyword && t.keyword.includes(q))
+          : []
+
+        const matchQuery = !q ||
+          v.title?.includes(q) ||
+          v.playlist?.includes(q) ||
+          v.category?.includes(q) ||
+          topicMatches.length > 0
+        const matchCat  = category === ALL_LABEL || v.category === category
+        const matchYear = year === ALL_YEARS || v.hebraic_year === year
+
+        if (!matchQuery || !matchCat || !matchYear) return null
+        return { video: v, topicMatches }
+      })
+      .filter(Boolean)
     dlog('SearchPage', 'results computed', { query, category, year, count: r.length })
     return r
   }, [allVideos, query, category, year, searched])
+
+  const topicMatchCount = useMemo(
+    () => results.filter(r => r.topicMatches.length > 0).length,
+    [results]
+  )
 
   const handleSearch = useCallback(() => {
     dlog('SearchPage', 'manual search button clicked', { query, category, year })
@@ -83,13 +103,22 @@ export default function SearchPage({ allVideos, categories, years, initialParams
             <Search size={16} style={styles.inputIcon} />
             <input
               type="text"
-              placeholder="חיפוש לפי כותרת…"
+              placeholder="חיפוש לפי כותרת או לפי נושא בתוך השיעור…"
               value={query}
               onChange={e => setQuery(e.target.value)}
               onKeyDown={handleKey}
               style={styles.input}
               dir="rtl"
+              list="keyword-suggestions"
+              autoComplete="off"
             />
+            {/* Native listbox of every distinct topic keyword the backend
+                extracted from the transcripts (fetched via /api/keywords,
+                see useKeywords.js) — lets people pick a known subject
+                instead of guessing free text. */}
+            <datalist id="keyword-suggestions">
+              {keywords.map(k => <option key={k} value={k} />)}
+            </datalist>
           </div>
 
           {/* Category select */}
@@ -152,10 +181,19 @@ export default function SearchPage({ allVideos, categories, years, initialParams
       {!loading && results.length > 0 && (
         <>
           <div style={styles.resultsHeader}>
-            <span style={styles.resultCount}>{results.length} שיעורים נמצאו</span>
+            <span style={styles.resultCount}>
+              {results.length} שיעורים נמצאו
+              {topicMatchCount > 0 && (
+                <span style={styles.resultSub}>
+                  {' '}· {topicMatchCount} מתוכם לפי נושא בתוך השיעור
+                </span>
+              )}
+            </span>
           </div>
           <div style={styles.grid}>
-            {results.map(v => <VideoCard key={v.id} video={v} />)}
+            {results.map(({ video, topicMatches }) => (
+              <VideoCard key={video.id} video={video} matchedTopics={topicMatches} />
+            ))}
           </div>
         </>
       )}
@@ -274,6 +312,10 @@ const styles = {
     fontSize: '.85rem',
     color: '#6B5E47',
     fontFamily: "'Heebo', sans-serif",
+  },
+  resultSub: {
+    color: '#B8860B',
+    fontWeight: 600,
   },
   grid: {
     display: 'grid',

@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Play, Clock, Eye, Calendar, X, ExternalLink, BookOpen } from 'lucide-react'
+import { Play, Clock, Eye, Calendar, X, ExternalLink, BookOpen, Tag } from 'lucide-react'
 
 function formatDate(iso) {
   if (!iso) return null
@@ -15,15 +15,42 @@ function formatViews(n) {
   return String(n)
 }
 
-export default function VideoCard({ video }) {
+// Formats a position in seconds as m:ss (e.g. 137 -> "2:17"), for the
+// jump-to-topic chips and the modal's topic list.
+function formatTime(seconds) {
+  if (seconds == null || isNaN(seconds)) return ''
+  const total = Math.floor(seconds)
+  const m = Math.floor(total / 60)
+  const s = total % 60
+  return `${m}:${String(s).padStart(2, '0')}`
+}
+
+// video.topics  — full list of {keyword, start} markers on this video
+//                 (only present for הלכה יומית videos with transcript_status
+//                 "done"), used to render the "jump within this lesson" list
+//                 inside the modal.
+// matchedTopics — the subset of those topics that matched the current
+//                 search keyword (passed in from SearchPage/HomePage),
+//                 rendered as chips on the card itself so the person can
+//                 jump straight to that moment without opening the modal
+//                 first.
+export default function VideoCard({ video, matchedTopics = [] }) {
   const [modalOpen, setModalOpen] = useState(false)
+  const [startAt, setStartAt] = useState(null) // seconds to start the embed at, or null = beginning
+
+  const openAt = (seconds = null) => {
+    setStartAt(seconds)
+    setModalOpen(true)
+  }
 
   const thumb = video.thumbnail ||
     (video.id ? `https://img.youtube.com/vi/${video.id}/mqdefault.jpg` : null)
 
+  const allTopics = Array.isArray(video.topics) ? video.topics : []
+
   return (
     <>
-      <article style={styles.card} onClick={() => setModalOpen(true)}>
+      <article style={styles.card} onClick={() => openAt(null)}>
         {/* Thumbnail */}
         <div style={styles.thumbWrap}>
           {thumb
@@ -63,6 +90,24 @@ export default function VideoCard({ video }) {
               </span>
             )}
           </div>
+
+          {/* Matched topic chips — clicking one jumps straight into the
+              video, starting playback at that exact position. */}
+          {matchedTopics.length > 0 && (
+            <div style={styles.topicsRow} onClick={e => e.stopPropagation()}>
+              {matchedTopics.map((t, i) => (
+                <button
+                  key={i}
+                  style={styles.topicChip}
+                  onClick={() => openAt(t.start)}
+                  title="לחצו כדי לצפות מנקודה זו בשיעור"
+                >
+                  <Clock size={10} style={{ marginLeft: 4, flexShrink: 0 }} />
+                  {formatTime(t.start)} · {t.keyword}
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </article>
 
@@ -76,16 +121,48 @@ export default function VideoCard({ video }) {
             <h2 style={styles.modalTitle}>{video.title}</h2>
             <div style={styles.categoryTag}>{video.category}</div>
 
-            {/* YouTube embed */}
+            {/* YouTube embed — starts at `startAt` seconds and autoplays
+                when opened via a topic jump; starts from the beginning
+                (paused, per YouTube's default) when opened normally. */}
             {video.id && (
               <div style={styles.embedWrap}>
                 <iframe
-                  src={`https://www.youtube.com/embed/${video.id}?rel=0&hl=iw`}
+                  key={startAt ?? 'start'}
+                  src={
+                    `https://www.youtube.com/embed/${video.id}?rel=0&hl=iw` +
+                    (startAt ? `&start=${Math.floor(startAt)}&autoplay=1` : '')
+                  }
                   title={video.title}
                   style={styles.embed}
                   allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
                   allowFullScreen
                 />
+              </div>
+            )}
+
+            {/* Full topic list for this lesson — lets the person jump
+                around within the video even outside of a search. */}
+            {allTopics.length > 0 && (
+              <div style={styles.topicsSection}>
+                <div style={styles.topicsSectionHeader}>
+                  <Tag size={13} color="#B8860B" />
+                  <span>נושאים בשיעור זה</span>
+                </div>
+                <div style={styles.topicsList}>
+                  {allTopics.map((t, i) => (
+                    <button
+                      key={i}
+                      style={{
+                        ...styles.topicListItem,
+                        ...(startAt === t.start ? styles.topicListItemActive : {}),
+                      }}
+                      onClick={() => setStartAt(t.start)}
+                    >
+                      <span style={styles.topicTime}>{formatTime(t.start)}</span>
+                      <span>{t.keyword}</span>
+                    </button>
+                  ))}
+                </div>
               </div>
             )}
 
@@ -122,7 +199,12 @@ export default function VideoCard({ video }) {
               )}
             </div>
 
-            <a href={video.url} target="_blank" rel="noopener noreferrer" style={styles.ytLink}>
+            <a
+              href={startAt ? `${video.url}&t=${Math.floor(startAt)}s` : video.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              style={styles.ytLink}
+            >
               <ExternalLink size={14} style={{ marginLeft: 6 }} />
               פתח ביוטיוב
             </a>
@@ -144,6 +226,80 @@ const styles = {
     transition: 'transform .2s, box-shadow .2s',
     display: 'flex',
     flexDirection: 'column',
+  },
+  topicsRow: {
+    display: 'flex',
+    flexWrap: 'wrap',
+    gap: 6,
+    marginTop: 8,
+  },
+  topicChip: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    background: 'rgba(184,134,11,.12)',
+    border: '1px solid rgba(184,134,11,.35)',
+    color: '#8B6500',
+    fontSize: '.7rem',
+    fontFamily: "'Heebo', sans-serif",
+    fontWeight: 600,
+    padding: '4px 9px',
+    borderRadius: 20,
+    cursor: 'pointer',
+    whiteSpace: 'nowrap',
+    maxWidth: '100%',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  topicsSection: {
+    marginBottom: 20,
+    background: '#F5F0E8',
+    border: '1px solid rgba(184,134,11,.15)',
+    borderRadius: 8,
+    padding: '12px 14px',
+  },
+  topicsSectionHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: '.8rem',
+    fontWeight: 600,
+    color: '#1C1610',
+    fontFamily: "'Heebo', sans-serif",
+    marginBottom: 10,
+  },
+  topicsList: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+  },
+  topicListItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    background: 'transparent',
+    border: 'none',
+    borderRadius: 6,
+    padding: '6px 8px',
+    fontSize: '.82rem',
+    fontFamily: "'Heebo', sans-serif",
+    color: '#3D3323',
+    textAlign: 'right',
+    cursor: 'pointer',
+    transition: 'background .15s',
+  },
+  topicListItemActive: {
+    background: 'rgba(184,134,11,.18)',
+    color: '#8B6500',
+    fontWeight: 600,
+  },
+  topicTime: {
+    fontFamily: "'Heebo', sans-serif",
+    fontVariantNumeric: 'tabular-nums',
+    color: '#1A3A5C',
+    fontWeight: 700,
+    fontSize: '.78rem',
+    flexShrink: 0,
+    minWidth: 36,
   },
   thumbWrap: {
     position: 'relative',
