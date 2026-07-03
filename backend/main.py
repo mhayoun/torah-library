@@ -102,7 +102,18 @@ async def get_redis():
     url = os.environ.get("REDIS_URL")
     if not url:
         raise HTTPException(status_code=500, detail="REDIS_URL not configured")
-    return await aioredis.from_url(url, decode_responses=True)
+    # Explicit timeouts + one automatic retry: without these, a slow/flaky
+    # link to Upstash (common on some networks/VPNs for non-443 ports)
+    # hangs for redis-py's long internal default before raising a raw,
+    # unhelpful TimeoutError deep in the traceback.
+    return await aioredis.from_url(
+        url,
+        decode_responses=True,
+        socket_connect_timeout=10,
+        socket_timeout=10,
+        retry_on_timeout=True,
+        health_check_interval=30,
+    )
 
 
 def _extract_keywords(all_videos: list[dict]) -> list[str]:
@@ -214,6 +225,7 @@ async def _build_response(r) -> dict:
     new_ids = fresh_ids - existing_ids
     if new_ids:
         from halacha_transcripts import HALACHA_CATEGORY, process_video_transcript
+        from ai_keywords_utils import QuotaExhaustedError
         new_halacha_videos = [
             v for v in all_videos
             if v.get("id") in new_ids and v.get("category") == HALACHA_CATEGORY
@@ -225,6 +237,10 @@ async def _build_response(r) -> dict:
             for v in new_halacha_videos[:max_auto]:
                 try:
                     process_video_transcript(v, logger=True)
+                except QuotaExhaustedError as e:
+                    print(f"[transcript] {e}\n[transcript] stopping early — "
+                          f"remaining video(s) this sync would fail the same way.")
+                    break
                 except Exception as e:
                     print(f"[transcript] unexpected failure for {v.get('id')}: {e}")
             skipped = len(new_halacha_videos) - max_auto

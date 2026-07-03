@@ -22,7 +22,7 @@ small):
 from datetime import datetime, timezone
 
 from transcript_utils import fetch_hebrew_transcript, NoHebrewTranscript
-from ai_keywords_utils import extract_topics
+from ai_keywords_utils import extract_topics, QuotaExhaustedError
 
 HALACHA_CATEGORY = "הלכה יומית"
 
@@ -65,6 +65,11 @@ def process_video_transcript(video: dict, logger=None) -> bool:
 
     try:
         topics = extract_topics(title, segments)
+    except QuotaExhaustedError:
+        # Account/project-level condition, not this video's fault — don't
+        # write a misleading transcript_error onto it. Let the caller
+        # (backfill script / daily sync) decide to stop the batch.
+        raise
     except Exception as e:
         video["topics"] = []
         video["transcript_status"] = "error"

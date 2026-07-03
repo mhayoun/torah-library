@@ -12,34 +12,70 @@ It always picks up where it left off — videos already marked "done" or
 single huge run that burns your whole YouTube/Gemini quota (or times
 out) in one go.
 
-Between videos, it sleeps a random duration (default 3-5 minutes) —
-this spreads out the transcript requests instead of hammering YouTube
-back-to-back, which lowers the chance of getting IP-blocked/rate-limited
-mid-run.
-
 Usage:
     python3 backfill_halacha_transcripts.py --limit 20
     python3 backfill_halacha_transcripts.py --limit 5 --dry-run
-    python3 backfill_halacha_transcripts.py --limit 50 --sleep-min 2 --sleep-max 4
 """
 
 import argparse
 import asyncio
 import json
-import random
-import time
+import sys
 
 from dotenv import load_dotenv
 load_dotenv()
 
+from redis.exceptions import RedisError
+
 from main import get_redis, _response_from_full
 from halacha_transcripts import HALACHA_CATEGORY, needs_transcript, process_video_transcript
+from ai_keywords_utils import _discover_model, QuotaExhaustedError
 
 
-async def run(limit: int, dry_run: bool, sleep_min_minutes: float, sleep_max_minutes: float):
-    r = await get_redis()
+async def _connect_with_retry(attempts: int = 3, delay: float = 2.0):
+    """
+    get_redis() + a real round-trip (PING) so a dead/slow connection to
+    Upstash is caught here with a clear message, instead of surfacing
+    later as a raw TimeoutError from deep inside redis-py.
+    """
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        r = await get_redis()
+        try:
+            await r.ping()
+            return r
+        except RedisError as e:
+            last_err = e
+            await r.aclose()
+            print(f"⚠️  Redis connection attempt {attempt}/{attempts} failed "
+                  f"({type(e).__name__}: {e}); retrying in {delay:.0f}s...")
+            await asyncio.sleep(delay)
+    print(f"❌ Could not reach Redis after {attempts} attempts: {last_err}\n"
+          f"   Check that REDIS_URL is correct and reachable (e.g. "
+          f"`redis-cli --tls -u $REDIS_URL ping`), and that nothing on "
+          f"your network is blocking port 6379.")
+    sys.exit(1)
+
+
+async def run(limit: int, dry_run: bool):
+    print("=== Gemini model discovery ===")
     try:
-        raw = await r.get("cours_full")
+        model = _discover_model()
+        print(f"Will use: {model}")
+    except Exception as e:
+        print(f"❌ Model discovery raised {type(e).__name__}: {e}")
+    print("===============================\n")
+
+    r = await _connect_with_retry()
+    try:
+        try:
+            raw = await r.get("cours_full")
+        except RedisError as e:
+            print(f"❌ Connected, but reading 'cours_full' failed: "
+                  f"{type(e).__name__}: {e}\n"
+                  f"   This usually means the connection is fine but the "
+                  f"link is flaky mid-request — try re-running.")
+            sys.exit(1)
         all_videos = json.loads(raw) if raw else []
         print(f"cours_full: {len(all_videos)} video(s) total")
 
@@ -57,19 +93,23 @@ async def run(limit: int, dry_run: bool, sleep_min_minutes: float, sleep_max_min
         print(f"Processing {len(batch)} video(s) (limit={limit}, dry_run={dry_run})...\n")
 
         done = 0
+        quota_hit = False
         for i, video in enumerate(batch, 1):
             print(f"[{i}/{len(batch)}] {video.get('title')}  ({video.get('id')})")
             if dry_run:
                 continue
-            ok = process_video_transcript(video, logger=True)
+            try:
+                ok = process_video_transcript(video, logger=True)
+            except QuotaExhaustedError as e:
+                print(f"\n🛑 {e}\n\nStopping this run early — the remaining "
+                      f"{len(batch) - i + 1} video(s) in this batch would "
+                      f"fail the same way. Fix the quota/billing issue above, "
+                      f"then just re-run the script; it picks up where it "
+                      f"left off.")
+                quota_hit = True
+                break
             if ok:
                 done += 1
-            if i < len(batch) and sleep_max_minutes > 0:
-                sleep_seconds = random.uniform(
-                    sleep_min_minutes * 60, sleep_max_minutes * 60
-                )
-                print(f"   … sleeping {sleep_seconds / 60:.1f} min before the next video")
-                time.sleep(sleep_seconds)
 
         if dry_run:
             print("\nDry run — nothing written to Redis.")
@@ -78,9 +118,14 @@ async def run(limit: int, dry_run: bool, sleep_min_minutes: float, sleep_max_min
         # cours_full holds these same (mutated) video dicts, so saving it
         # persists everything; then rebuild cours_response so the change
         # is visible to the frontend too, without waiting for tomorrow's
-        # sync to overwrite it.
+        # sync to overwrite it. Save even on an early quota-hit exit so
+        # whatever succeeded before the block isn't lost.
         await r.set("cours_full", json.dumps(all_videos, ensure_ascii=False))
         await _response_from_full(r, all_videos)
+
+        if quota_hit:
+            print(f"\n{done} video(s) saved before hitting the quota block.")
+            return
 
         print(f"\nDone. {done}/{len(batch)} video(s) successfully processed and saved.")
         remaining = len(candidates) - len(batch)
@@ -99,13 +144,6 @@ if __name__ == "__main__":
                          help="Max number of videos to process this run (default: 10)")
     parser.add_argument("--dry-run", action="store_true",
                          help="Only show what would be processed; write nothing")
-    parser.add_argument("--sleep-min", type=float, default=3.0,
-                         help="Minimum minutes to pause between videos (default: 3)")
-    parser.add_argument("--sleep-max", type=float, default=5.0,
-                         help="Maximum minutes to pause between videos (default: 5)")
     args = parser.parse_args()
 
-    if args.sleep_min < 0 or args.sleep_max < args.sleep_min:
-        parser.error("--sleep-max must be >= --sleep-min, and both must be >= 0")
-
-    asyncio.run(run(args.limit, args.dry_run, args.sleep_min, args.sleep_max))
+    asyncio.run(run(args.limit, args.dry_run))
