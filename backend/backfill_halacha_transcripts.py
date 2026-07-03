@@ -12,15 +12,21 @@ It always picks up where it left off — videos already marked "done" or
 single huge run that burns your whole YouTube/Gemini quota (or times
 out) in one go.
 
+Between videos, it sleeps a random duration (default 3-5 minutes) —
+this spreads out the transcript requests instead of hammering YouTube
+back-to-back, which lowers the chance of getting IP-blocked/rate-limited
+mid-run.
+
 Usage:
     python3 backfill_halacha_transcripts.py --limit 20
     python3 backfill_halacha_transcripts.py --limit 5 --dry-run
-    python3 backfill_halacha_transcripts.py --limit 50 --sleep 2
+    python3 backfill_halacha_transcripts.py --limit 50 --sleep-min 2 --sleep-max 4
 """
 
 import argparse
 import asyncio
 import json
+import random
 import time
 
 from dotenv import load_dotenv
@@ -30,7 +36,7 @@ from main import get_redis, _response_from_full
 from halacha_transcripts import HALACHA_CATEGORY, needs_transcript, process_video_transcript
 
 
-async def run(limit: int, dry_run: bool, sleep_seconds: float):
+async def run(limit: int, dry_run: bool, sleep_min_minutes: float, sleep_max_minutes: float):
     r = await get_redis()
     try:
         raw = await r.get("cours_full")
@@ -58,7 +64,11 @@ async def run(limit: int, dry_run: bool, sleep_seconds: float):
             ok = process_video_transcript(video, logger=True)
             if ok:
                 done += 1
-            if i < len(batch) and sleep_seconds > 0:
+            if i < len(batch) and sleep_max_minutes > 0:
+                sleep_seconds = random.uniform(
+                    sleep_min_minutes * 60, sleep_max_minutes * 60
+                )
+                print(f"   … sleeping {sleep_seconds / 60:.1f} min before the next video")
                 time.sleep(sleep_seconds)
 
         if dry_run:
@@ -89,8 +99,13 @@ if __name__ == "__main__":
                          help="Max number of videos to process this run (default: 10)")
     parser.add_argument("--dry-run", action="store_true",
                          help="Only show what would be processed; write nothing")
-    parser.add_argument("--sleep", type=float, default=1.5,
-                         help="Seconds to pause between videos (default: 1.5)")
+    parser.add_argument("--sleep-min", type=float, default=3.0,
+                         help="Minimum minutes to pause between videos (default: 3)")
+    parser.add_argument("--sleep-max", type=float, default=5.0,
+                         help="Maximum minutes to pause between videos (default: 5)")
     args = parser.parse_args()
 
-    asyncio.run(run(args.limit, args.dry_run, args.sleep))
+    if args.sleep_min < 0 or args.sleep_max < args.sleep_min:
+        parser.error("--sleep-max must be >= --sleep-min, and both must be >= 0")
+
+    asyncio.run(run(args.limit, args.dry_run, args.sleep_min, args.sleep_max))
