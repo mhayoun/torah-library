@@ -15,12 +15,18 @@ Endpoints:
                      from the keywords_list Redis key. Lets the frontend
                      populate a search suggestions listbox without
                      downloading/scanning the whole catalogue.
-  POST /api/sync    — called by the Vercel cron job once a day at 6am
+  GET/POST /api/sync — called by the Vercel cron job once a day
                      (or by a YouTube PubSubHubbub webhook); runs the
                      actual incremental sync against YouTube and
                      refreshes cours_full, cours_response and
                      keywords_list. This is the ONLY regular source of
-                     fresh data.
+                     fresh data. GET is required because Vercel Cron
+                     Jobs only ever send GET requests — POST is kept
+                     for manual/webhook triggers. If CRON_SECRET is
+                     set, requests must include
+                     "Authorization: Bearer <CRON_SECRET>" (Vercel
+                     adds this automatically for cron-triggered
+                     requests).
 
 Redis keys:
   cours_response   — full JSON response body. No TTL: it is only ever
@@ -49,7 +55,7 @@ from dotenv import load_dotenv
 load_dotenv()   # must run BEFORE importing playlist_videos_utils, which reads
                 # YOUTUBE_API_KEY from os.environ at import time.
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis as aioredis
 import ssl
@@ -367,13 +373,26 @@ async def get_keywords():
 
 
 @app.post("/api/sync")
-async def force_sync():
+@app.get("/api/sync")
+async def force_sync(authorization: str | None = Header(default=None)):
     """
-    Called by the Vercel cron job once a day at 6am, or by a YouTube PubSubHubbub
+    Called by the Vercel cron job once a day, or by a YouTube PubSubHubbub
     webhook when a new video is published.
     Runs the real incremental sync against YouTube and overwrites
     cours_full / cours_response with fresh data.
+
+    NOTE: Vercel Cron Jobs only ever send GET requests to the configured
+    path — they cannot be made to send POST. That's why this route accepts
+    both. If a CRON_SECRET env var is set (Vercel Project Settings →
+    Environment Variables), Vercel automatically attaches it as
+    "Authorization: Bearer <CRON_SECRET>" on cron-triggered requests, and
+    we verify it here so nobody else can trigger a sync by just hitting
+    this URL in a browser.
     """
+    secret = os.environ.get("CRON_SECRET")
+    if secret and authorization != f"Bearer {secret}":
+        raise HTTPException(status_code=401, detail="Unauthorized")
+
     r = await get_redis()
     try:
         result = await _build_response(r)
