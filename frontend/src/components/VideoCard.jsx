@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Play, Clock, Eye, Calendar, X, ExternalLink, BookOpen, Tag } from 'lucide-react'
+import { Play, Clock, Eye, Calendar, X, ExternalLink, BookOpen, Tag, FileText, Loader2, ChevronDown, ChevronUp } from 'lucide-react'
 
 function formatDate(iso) {
   if (!iso) return null
@@ -38,9 +38,46 @@ export default function VideoCard({ video, matchedTopics = [] }) {
   const [modalOpen, setModalOpen] = useState(false)
   const [startAt, setStartAt] = useState(null) // seconds to start the embed at, or null = beginning
 
+  // Transcript panel — fetched lazily from GET /api/transcript/{id} only
+  // when the person actually clicks "show transcript" inside the modal,
+  // never on page load. `transcript` holds { video_id, chunks, updated }
+  // once loaded; `transcriptChecked` distinguishes "haven't tried yet"
+  // from "tried and got nothing" so we don't refetch on every toggle.
+  const [transcriptOpen, setTranscriptOpen] = useState(false)
+  const [transcript, setTranscript] = useState(null)
+  const [transcriptLoading, setTranscriptLoading] = useState(false)
+  const [transcriptError, setTranscriptError] = useState(null)
+  const [transcriptChecked, setTranscriptChecked] = useState(false)
+
   const openAt = (seconds = null) => {
     setStartAt(seconds)
     setModalOpen(true)
+  }
+
+  const toggleTranscript = () => {
+    const willOpen = !transcriptOpen
+    setTranscriptOpen(willOpen)
+    if (willOpen && !transcriptChecked && video.id) {
+      setTranscriptLoading(true)
+      setTranscriptError(null)
+      fetch(`/api/transcript/${video.id}`)
+        .then(r => {
+          if (r.status === 404) { setTranscript(null); return null }
+          if (!r.ok) throw new Error(`Erreur serveur : ${r.status}`)
+          return r.json()
+        })
+        .then(data => { if (data) setTranscript(data) })
+        .catch(e => setTranscriptError(e.message))
+        .finally(() => {
+          setTranscriptLoading(false)
+          setTranscriptChecked(true)
+        })
+    }
+  }
+
+  const closeModal = () => {
+    setModalOpen(false)
+    setTranscriptOpen(false)
   }
 
   const thumb = video.thumbnail ||
@@ -113,9 +150,9 @@ export default function VideoCard({ video, matchedTopics = [] }) {
 
       {/* Modal */}
       {modalOpen && (
-        <div style={styles.backdrop} onClick={() => setModalOpen(false)}>
+        <div style={styles.backdrop} onClick={closeModal}>
           <div style={styles.modal} onClick={e => e.stopPropagation()}>
-            <button style={styles.closeBtn} onClick={() => setModalOpen(false)}>
+            <button style={styles.closeBtn} onClick={closeModal}>
               <X size={20} />
             </button>
             <h2 style={styles.modalTitle}>{video.title}</h2>
@@ -165,6 +202,57 @@ export default function VideoCard({ video, matchedTopics = [] }) {
                 </div>
               </div>
             )}
+
+            {/* Transcript panel — lazy-loaded on demand from
+                GET /api/transcript/{id} only when the person clicks
+                this button; not fetched on page load or modal open. */}
+            <div style={styles.transcriptSection}>
+              <button style={styles.transcriptToggle} onClick={toggleTranscript}>
+                <FileText size={14} color="#B8860B" />
+                <span>תמלול השיעור</span>
+                {transcriptOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+              </button>
+
+              {transcriptOpen && (
+                <div style={styles.transcriptBody}>
+                  {transcriptLoading && (
+                    <div style={styles.transcriptStatus}>
+                      <Loader2 size={16} className="spin" />
+                      <span>טוען תמלול…</span>
+                    </div>
+                  )}
+                  {!transcriptLoading && transcriptError && (
+                    <div style={styles.transcriptStatus}>שגיאה בטעינת התמלול: {transcriptError}</div>
+                  )}
+                  {!transcriptLoading && !transcriptError && transcriptChecked && !transcript && (
+                    <div style={styles.transcriptStatus}>אין תמלול זמין לשיעור זה</div>
+                  )}
+                  {!transcriptLoading && transcript?.chunks?.length > 0 && (
+                    <div style={styles.transcriptChunks}>
+                      {transcript.chunks.map((c, i) => (
+                        <div
+                          key={i}
+                          style={{
+                            ...styles.transcriptChunk,
+                            ...(startAt === c.start ? styles.transcriptChunkActive : {}),
+                          }}
+                        >
+                          <button
+                            style={styles.transcriptChunkHeader}
+                            onClick={() => setStartAt(c.start)}
+                            title="לחצו כדי לצפות מנקודה זו בשיעור"
+                          >
+                            <span style={styles.topicTime}>{formatTime(c.start)}</span>
+                            <span>{c.keyword || 'פתיחה'}</span>
+                          </button>
+                          <p style={styles.transcriptChunkText}>{c.text}</p>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
 
             <div style={styles.modalMeta}>
               {video.hebraic_year && (
@@ -300,6 +388,76 @@ const styles = {
     fontSize: '.78rem',
     flexShrink: 0,
     minWidth: 36,
+  },
+  transcriptSection: {
+    marginBottom: 20,
+    border: '1px solid rgba(184,134,11,.15)',
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  transcriptToggle: {
+    width: '100%',
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    background: '#F5F0E8',
+    border: 'none',
+    padding: '10px 14px',
+    fontSize: '.82rem',
+    fontWeight: 600,
+    color: '#1C1610',
+    fontFamily: "'Heebo', sans-serif",
+    cursor: 'pointer',
+  },
+  transcriptBody: {
+    padding: '12px 14px',
+    background: '#FDFBF7',
+    maxHeight: 320,
+    overflowY: 'auto',
+  },
+  transcriptStatus: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    fontSize: '.8rem',
+    color: '#6B5E47',
+    fontFamily: "'Heebo', sans-serif",
+    padding: '4px 2px',
+  },
+  transcriptChunks: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 12,
+  },
+  transcriptChunk: {
+    borderRadius: 6,
+    padding: '6px 8px',
+    transition: 'background .15s',
+  },
+  transcriptChunkActive: {
+    background: 'rgba(184,134,11,.1)',
+  },
+  transcriptChunkHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 10,
+    background: 'transparent',
+    border: 'none',
+    padding: '2px 0 4px',
+    fontSize: '.8rem',
+    fontWeight: 600,
+    color: '#8B6500',
+    fontFamily: "'Heebo', sans-serif",
+    cursor: 'pointer',
+    textAlign: 'right',
+    width: '100%',
+  },
+  transcriptChunkText: {
+    margin: 0,
+    fontSize: '.82rem',
+    lineHeight: 1.7,
+    color: '#3D3323',
+    fontFamily: "'Heebo', sans-serif",
   },
   thumbWrap: {
     position: 'relative',

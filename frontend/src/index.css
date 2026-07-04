@@ -59,6 +59,8 @@ a { color: inherit; text-decoration: none; }
 /* ── Spinner ─────────────────────────────────────────────────────── */
 @keyframes spin { to { transform: rotate(360deg); } }
 
+.spin { animation: spin 1s linear infinite; }
+
 .ornament::before, .ornament::after {
   content: '';
   flex: 1;
