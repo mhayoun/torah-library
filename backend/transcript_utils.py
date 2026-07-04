@@ -13,12 +13,60 @@ file, which is exactly the shape we need to anchor AI-extracted topics
 to a "skip to this second" position.
 """
 
+import os
+
 from youtube_transcript_api import YouTubeTranscriptApi
 from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
     VideoUnavailable,
 )
+
+try:
+    from youtube_transcript_api.proxies import GenericProxyConfig, WebshareProxyConfig
+except ImportError:  # older versions of the library don't have this module
+    GenericProxyConfig = None
+    WebshareProxyConfig = None
+
+
+def _build_proxy_config():
+    """
+    Builds a proxy config from environment variables, if any are set.
+    Supports either:
+      - Webshare "Residential" package:
+          WEBSHARE_PROXY_USERNAME, WEBSHARE_PROXY_PASSWORD
+      - Any other provider (Bright Data, IPRoyal, Smartproxy/Decodo,
+        Oxylabs, a self-hosted proxy, etc.) via generic proxy URLs:
+          HTTP_PROXY / HTTPS_PROXY
+        (each typically looks like http://user:pass@host:port)
+    Returns None if nothing is configured, in which case requests go out
+    directly (unproxied) as before.
+    """
+    ws_user = os.environ.get("WEBSHARE_PROXY_USERNAME")
+    ws_pass = os.environ.get("WEBSHARE_PROXY_PASSWORD")
+    if ws_user and ws_pass and WebshareProxyConfig is not None:
+        return WebshareProxyConfig(proxy_username=ws_user, proxy_password=ws_pass)
+
+    http_proxy = os.environ.get("HTTP_PROXY") or os.environ.get("http_proxy")
+    https_proxy = os.environ.get("HTTPS_PROXY") or os.environ.get("https_proxy")
+    if (http_proxy or https_proxy) and GenericProxyConfig is not None:
+        return GenericProxyConfig(
+            http_url=http_proxy or https_proxy,
+            https_url=https_proxy or http_proxy,
+        )
+
+    return None
+
+
+_PROXY_CONFIG = _build_proxy_config()
+
+
+def _api_instance():
+    """Single place that constructs YouTubeTranscriptApi, so the proxy
+    config (if any) is always applied consistently."""
+    if _PROXY_CONFIG is not None:
+        return YouTubeTranscriptApi(proxy_config=_PROXY_CONFIG)
+    return YouTubeTranscriptApi()
 
 # YouTube has historically used 'iw' (old ISO 639-1 code for Hebrew) for
 # auto-generated captions, and 'he' for manually-uploaded ones. Try both,
@@ -63,9 +111,13 @@ def _list_transcripts(video_id):
         reliable way to pick the right call rather than try/except
         AttributeError, which can mask real errors from inside the call.)
     """
-    if hasattr(YouTubeTranscriptApi, "list_transcripts"):
+    if hasattr(YouTubeTranscriptApi, "list_transcripts") and _PROXY_CONFIG is None:
+        # The old classmethod path has no way to pass a proxy config, so
+        # only use it when no proxy is configured. When a proxy IS
+        # configured, fall through to the instance-based call below even
+        # on older library versions that still expose the classmethod.
         return YouTubeTranscriptApi.list_transcripts(video_id)
-    return YouTubeTranscriptApi().list(video_id)
+    return _api_instance().list(video_id)
 
 
 def _get_transcript_direct(video_id, languages):
@@ -75,9 +127,9 @@ def _get_transcript_direct(video_id, languages):
       - youtube-transcript-api < 1.0  : classmethod YouTubeTranscriptApi.get_transcript(...)
       - youtube-transcript-api >= 1.0 : instance method YouTubeTranscriptApi().fetch(...)
     """
-    if hasattr(YouTubeTranscriptApi, "get_transcript"):
+    if hasattr(YouTubeTranscriptApi, "get_transcript") and _PROXY_CONFIG is None:
         return YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
-    return YouTubeTranscriptApi().fetch(video_id, languages=languages)
+    return _api_instance().fetch(video_id, languages=languages)
 
 
 def _normalize(raw_segments):

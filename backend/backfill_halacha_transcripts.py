@@ -20,6 +20,7 @@ Usage:
 import argparse
 import asyncio
 import json
+import random
 import sys
 
 from dotenv import load_dotenv
@@ -58,7 +59,7 @@ async def _connect_with_retry(attempts: int = 3, delay: float = 2.0):
     sys.exit(1)
 
 
-async def run(limit: int, dry_run: bool):
+async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
     print("=== Gemini model discovery ===")
     try:
         model = _discover_model()
@@ -120,6 +121,11 @@ async def run(limit: int, dry_run: bool):
             if ok:
                 done += 1
 
+            if sleep_max > 0 and i < len(batch):
+                delay = random.uniform(sleep_min, sleep_max)
+                print(f"    …sleeping {delay:.1f}s before next video…")
+                await asyncio.sleep(delay)
+
         if dry_run:
             print("\nDry run — nothing written to Redis.")
             return
@@ -153,6 +159,20 @@ if __name__ == "__main__":
                          help="Max number of videos to process this run (default: 10)")
     parser.add_argument("--dry-run", action="store_true",
                          help="Only show what would be processed; write nothing")
+    parser.add_argument("--sleep-min", type=float, default=4.0,
+                         help="Minimum seconds to sleep between videos, to "
+                              "avoid hammering the YouTube/Gemini APIs "
+                              "back-to-back (default: 4)")
+    parser.add_argument("--sleep-max", type=float, default=5.0,
+                         help="Maximum seconds to sleep between videos; the "
+                              "actual delay is randomized between "
+                              "--sleep-min and --sleep-max each time "
+                              "(default: 5)")
     args = parser.parse_args()
 
-    asyncio.run(run(args.limit, args.dry_run))
+    if args.sleep_min < 0 or args.sleep_max < 0:
+        parser.error("--sleep-min/--sleep-max must be >= 0")
+    if args.sleep_min > args.sleep_max:
+        parser.error("--sleep-min cannot be greater than --sleep-max")
+
+    asyncio.run(run(args.limit, args.dry_run, args.sleep_min, args.sleep_max))

@@ -16,3 +16,9 @@ python3 backfill_halacha_transcripts.py --limit 1
 # simulate cron
 curl -i https://rav-aaron-butbul.vercel.app/api/sync \
   -H "Authorization: Bearer 90d03b45b7306005c2ec37d3eb4fcc6475957c4fd95317ed9fefebac94a6b6af"
+
+#run backend localhost
+uvicorn main:app --reload --port 8000
+
+#run frontend localhost
+npm run dev
