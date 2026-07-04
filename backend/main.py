@@ -15,6 +15,20 @@ Endpoints:
                      from the keywords_list Redis key. Lets the frontend
                      populate a search suggestions listbox without
                      downloading/scanning the whole catalogue.
+  GET /api/transcript/{video_id} — returns the Hebrew transcript for
+                     one video pre-split into one chunk per AI-extracted
+                     topic keyword, read straight from its own
+                     `transcript:<video_id>` Redis key: { "video_id",
+                     "chunks": [{"keyword","start","end","text"}, ...],
+                     "updated" }. Each chunk's `keyword` matches one of
+                     this video's `topics[*].keyword` from /api/cours
+                     (or null for the intro before the first topic), so
+                     the frontend can show exactly the transcript text
+                     for whichever keyword the person clicked, without
+                     scanning anything. This is intentionally NOT part
+                     of /api/cours — it's only fetched on demand, when
+                     someone actually opens the transcript panel for a
+                     video, so the main catalogue payload stays small.
   GET/POST /api/sync — called by the Vercel cron job once a day
                      (or by a YouTube PubSubHubbub webhook); runs the
                      actual incremental sync against YouTube and
@@ -41,6 +55,21 @@ Redis keys:
                      transcript backfill script), so the frontend can
                      fetch it cheaply via GET /api/keywords instead of
                      deriving it client-side from the full catalogue.
+  transcript:<id>  — one key PER VIDEO (id = YouTube video id). JSON:
+                     { "video_id", "chunks": [{"keyword", "start",
+                     "end", "text"}, ...], "updated" }. The transcript
+                     is pre-split into one chunk per AI-extracted topic
+                     (using that video's `topics` start times as cut
+                     points — see _chunk_transcript_by_topics), so the
+                     frontend can jump straight to the text for one
+                     keyword instead of scanning a flat segment list.
+                     No TTL. Written once, whenever a video's transcript
+                     is successfully fetched (daily sync or the backfill
+                     script) — kept out of cours_full/cours_response on
+                     purpose so the main catalogue stays small; only
+                     read back via GET /api/transcript/{video_id}, i.e.
+                     when a visitor actually opens that video's
+                     transcript panel.
 
 Environment variables (set in Vercel or .env):
   YOUTUBE_API_KEY
@@ -142,6 +171,86 @@ async def _save_keywords_list(r, all_videos: list[dict]) -> list[str]:
     return keywords
 
 
+def _chunk_transcript_by_topics(topics: list, segments: list) -> list[dict]:
+    """
+    Splits the flat list of transcript segments into contiguous chunks
+    aligned to the video's AI-extracted topic markers, so the stored
+    transcript is already organized "by keyword" instead of being one
+    long undifferentiated list.
+
+    Given topics sorted by start time [t0, t1, ..., tN], produces:
+      chunk 0   : [0, t0.start)          — keyword: None (intro, before
+                                            the first topic starts; only
+                                            included if non-empty)
+      chunk 1   : [t0.start, t1.start)   — keyword: t0.keyword
+      chunk 2   : [t1.start, t2.start)   — keyword: t1.keyword
+      ...
+      chunk N+1 : [tN.start, video end)  — keyword: tN.keyword
+
+    Example — topics = [{"keyword": "A", "start": 7}, {"keyword": "B",
+    "start": 60}] over a video that runs to e.g. 234s produces 3 chunks:
+    [0-7) (intro), [7-60) keyword "A", [60-234) keyword "B".
+
+    Each chunk is {"keyword": str | None, "start": float, "end": float,
+    "text": str} where `text` is the join of every segment whose start
+    falls in [start, end).
+    """
+    if not segments:
+        return []
+
+    sorted_topics = sorted(
+        (t for t in (topics or []) if t.get("keyword")),
+        key=lambda t: float(t.get("start", 0)),
+    )
+
+    video_end = max(s["start"] + s.get("duration", 0.0) for s in segments)
+
+    if not sorted_topics:
+        # No topics at all — fall back to one single untitled chunk
+        # covering the whole transcript.
+        text = " ".join(s["text"] for s in segments)
+        return [{"keyword": None, "start": 0.0, "end": video_end, "text": text}]
+
+    boundaries = [0.0] + [float(t["start"]) for t in sorted_topics] + [video_end]
+    keywords = [None] + [t["keyword"] for t in sorted_topics]
+
+    chunks = []
+    for i in range(len(boundaries) - 1):
+        start, end = boundaries[i], boundaries[i + 1]
+        if start == end:
+            # Empty intro chunk (first topic starts at 0s) — skip it.
+            continue
+        text = " ".join(s["text"] for s in segments if start <= s["start"] < end)
+        chunks.append({"keyword": keywords[i], "start": start, "end": end, "text": text})
+    return chunks
+
+
+async def _save_transcript(r, video: dict, segments: list) -> None:
+    """
+    Persists one video's transcript to its own `transcript:<id>` Redis
+    key (see module docstring) — kept separate from cours_full/
+    cours_response so the main catalogue payload stays small. Only ever
+    read back on demand via GET /api/transcript/{video_id}.
+
+    Stores the transcript split into per-keyword chunks (see
+    _chunk_transcript_by_topics) rather than the raw flat segment list,
+    using this video's `topics` (already present in cours_full) as the
+    chunk boundaries — so each chunk is exactly the transcript text for
+    one AI-extracted topic, ready for the frontend to show when someone
+    clicks that keyword.
+    """
+    vid_id = video.get("id")
+    if not vid_id or not segments:
+        return
+    chunks = _chunk_transcript_by_topics(video.get("topics") or [], segments)
+    payload = {
+        "video_id": vid_id,
+        "chunks": chunks,
+        "updated": video.get("transcript_updated"),
+    }
+    await r.set(f"transcript:{vid_id}", json.dumps(payload, ensure_ascii=False))
+
+
 # ── Core sync logic ───────────────────────────────────────────────────────────
 
 async def _build_response(r) -> dict:
@@ -237,7 +346,9 @@ async def _build_response(r) -> dict:
                   f"this sync — processing up to {max_auto}")
             for v in new_halacha_videos[:max_auto]:
                 try:
-                    process_video_transcript(v, logger=True)
+                    _ok, segments = process_video_transcript(v, logger=True)
+                    if segments:
+                        await _save_transcript(r, v, segments)
                 except (QuotaExhaustedError, TranscriptFetchBlocked) as e:
                     print(f"[transcript] {e}\n[transcript] stopping early — "
                           f"remaining video(s) this sync would fail the same way.")
@@ -385,6 +496,48 @@ async def get_keywords():
             return {"keywords": keywords}
         finally:
             await r.aclose()
+    except Exception as e:
+        return {"error": str(e), "type": type(e).__name__}
+
+
+@app.get("/api/transcript/{video_id}")
+async def get_transcript(video_id: str):
+    """
+    Returns the Hebrew transcript for one video, pre-split into one
+    chunk per AI-extracted topic keyword, read straight from its own
+    `transcript:<video_id>` Redis key — no scanning of cours_full/
+    cours_response required.
+
+    Meant to be called on demand only: when a visitor opens a video and
+    clicks the "show transcript" button (or clicks a specific topic
+    keyword). Each returned chunk's `keyword` matches one of this
+    video's `topics[*].keyword` from /api/cours, so the frontend can
+    match a clicked keyword to its chunk directly and just display
+    `chunk["text"]` — no client-side searching through raw segments
+    needed. The intro before the first topic (if any) is included as a
+    chunk with `keyword: null`.
+
+    Response shape:
+      { "video_id": str,
+        "chunks": [{"keyword": str | None, "start": float,
+                     "end": float, "text": str}, ...],
+        "updated": str | None }
+
+    404 if this video has no transcript stored yet (never processed, or
+    it genuinely has no Hebrew captions — check /api/cours for that
+    video's `transcript_status` to tell the two apart).
+    """
+    try:
+        r = await get_redis()
+        try:
+            raw = await r.get(f"transcript:{video_id}")
+            if not raw:
+                raise HTTPException(status_code=404, detail="No transcript available for this video")
+            return json.loads(raw)
+        finally:
+            await r.aclose()
+    except HTTPException:
+        raise
     except Exception as e:
         return {"error": str(e), "type": type(e).__name__}
 

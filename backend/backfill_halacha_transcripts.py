@@ -28,7 +28,7 @@ load_dotenv()
 
 from redis.exceptions import RedisError
 
-from main import get_redis, _response_from_full
+from main import get_redis, _response_from_full, _save_transcript
 from halacha_transcripts import HALACHA_CATEGORY, needs_transcript, process_video_transcript
 from ai_keywords_utils import _discover_model, QuotaExhaustedError
 from transcript_utils import TranscriptFetchBlocked
@@ -101,7 +101,9 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
             if dry_run:
                 continue
             try:
-                ok = process_video_transcript(video, logger=True)
+                ok, segments = process_video_transcript(video, logger=True)
+                if segments:
+                    await _save_transcript(r, video, segments)
             except QuotaExhaustedError as e:
                 print(f"\n🛑 {e}\n\nStopping this run early — the remaining "
                       f"{len(batch) - i + 1} video(s) in this batch would "

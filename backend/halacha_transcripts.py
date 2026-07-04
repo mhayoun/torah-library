@@ -1,22 +1,29 @@
 """
 halacha_transcripts.py
 -----------------------
-Shared logic to fetch a video's Hebrew transcript (used transiently, not
-stored) and attach AI-extracted topic markers (keyword + start position
-in seconds) to a single הלכה יומית video object. Used by both:
+Shared logic to fetch a video's Hebrew transcript and attach AI-extracted
+topic markers (keyword + start position in seconds) to a single הלכה
+יומית video object. Used by both:
 
   - backfill_halacha_transcripts.py — one-off manual backfill for
     existing videos in cours_full that don't have a transcript yet.
   - main.py's daily sync (_build_response) — automatic, new videos only,
     capped by MAX_AUTO_TRANSCRIPTS so it can't blow the Vercel timeout.
 
-Fields written onto the video dict (the raw transcript text itself is
-NOT kept — only the derived topic markers, to keep cours_full/cours_response
-small):
+Fields written onto the video dict (the raw transcript segments are NOT
+kept here — only the derived topic markers, to keep cours_full/
+cours_response small and fast to load on every page view):
   topics               — [{"keyword": str, "start": float}, ...]
   transcript_status    — "done" | "no_captions" | "error"
   transcript_error     — present only when status is "no_captions"/"error"
   transcript_updated   — ISO timestamp of the last processing attempt
+
+The full transcript (per-segment text + timing) is instead handed back
+to the caller as `segments`, which is responsible for persisting it
+separately (see main.py's `transcript:<video_id>` Redis key / the
+GET /api/transcript/<video_id> endpoint) so it's only ever loaded on
+demand — when someone actually opens the transcript panel for a video —
+rather than on every /api/cours page load.
 """
 
 from datetime import datetime, timezone
@@ -36,11 +43,18 @@ def needs_transcript(video: dict) -> bool:
     return video.get("transcript_status") not in ("done", "no_captions")
 
 
-def process_video_transcript(video: dict, logger=None) -> bool:
+def process_video_transcript(video: dict, logger=None) -> tuple[bool, list | None]:
     """
-    Mutates `video` in place. Returns True if topics were successfully
-    extracted, False otherwise (no captions available, or an error at
-    either the transcript-fetch or AI-extraction step).
+    Mutates `video` in place with the lightweight topic-marker fields
+    (see module docstring). Returns (ok, segments):
+      ok       — True if topics were successfully extracted, False
+                 otherwise (no captions available, or an error at either
+                 the transcript-fetch or AI-extraction step).
+      segments — the full list of {"text", "start", "duration"} dicts
+                 fetched for this video, or None if the fetch itself
+                 failed. The caller is responsible for persisting this
+                 (e.g. to the `transcript:<video_id>` Redis key) — it is
+                 NOT written onto `video` / cours_full.
     """
     vid_id = video.get("id")
     title = video.get("title", "")
@@ -54,7 +68,7 @@ def process_video_transcript(video: dict, logger=None) -> bool:
         video["transcript_updated"] = now()
         if logger:
             print(f"   ⚠️  No Hebrew captions for '{title}' ({vid_id}): {e}")
-        return False
+        return False, None
     except TranscriptFetchBlocked:
         # IP-level block, not this video's fault — don't write a
         # misleading transcript_error onto it, and definitely don't mark
@@ -67,7 +81,7 @@ def process_video_transcript(video: dict, logger=None) -> bool:
         video["transcript_updated"] = now()
         if logger:
             print(f"   ❌ Transcript fetch failed for '{title}' ({vid_id}): {e}")
-        return False
+        return False, None
 
     try:
         topics = extract_topics(title, segments)
@@ -83,7 +97,10 @@ def process_video_transcript(video: dict, logger=None) -> bool:
         video["transcript_updated"] = now()
         if logger:
             print(f"   ❌ Keyword extraction failed for '{title}' ({vid_id}): {e}")
-        return False
+        # The transcript fetch itself succeeded even though AI extraction
+        # didn't — still hand segments back so the transcript panel works
+        # even for videos where topic extraction failed.
+        return False, segments
 
     video["topics"] = topics
     video["transcript_status"] = "done"
@@ -91,4 +108,4 @@ def process_video_transcript(video: dict, logger=None) -> bool:
     video["transcript_updated"] = now()
     if logger:
         print(f"   ✅ {len(topics)} topic(s) extracted for '{title}' ({vid_id})")
-    return True
+    return True, segments
