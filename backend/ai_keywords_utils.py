@@ -14,10 +14,16 @@ worth a quick check there if you start seeing 429 rate-limit errors.
 Uses the current Google GenAI SDK (`google-genai` package, `from google
 import genai`) — the older `google-generativeai` package is deprecated.
 
-Fallback provider: Groq (optional). If GEMINI_API_KEY hits a 429 quota
-block (see QuotaExhaustedError) AND GROQ_API_KEY is set in the
-environment, extract_topics() automatically retries the same request on
-Groq instead of failing the video. Get a free key at
+Before giving up on Gemini: if GEMINI_MODEL isn't pinned in .env, every
+model available to this API key is tried in ranked order (best first)
+when the current one hits a 429 — free-tier quotas are generally
+per-model-per-day, not shared project-wide, so one exhausted model
+doesn't necessarily mean they all are.
+
+Fallback provider: Groq (optional). Only once *every* Gemini model
+candidate has 429'd (see QuotaExhaustedError) AND GROQ_API_KEY is set in
+the environment, extract_topics() automatically retries the same request
+on Groq instead of failing the video. Get a free key at
 https://console.groq.com/keys. Override the model with GROQ_MODEL in
 .env (default: llama-3.3-70b-versatile). If GROQ_API_KEY isn't set, the
 original Gemini QuotaExhaustedError is raised as before — Groq is purely
@@ -42,7 +48,9 @@ except ImportError:  # groq is an optional dependency — only needed if
 # that Google can rename/retire later (which would otherwise fail every
 # extraction with a 404 until someone notices and updates the constant).
 _MODEL_OVERRIDE = os.environ.get("GEMINI_MODEL")
-_discovered_model = None
+_discovered_models = None  # ranked list of ALL usable candidates, cached once
+_exhausted_models = set()  # models that hit 429 this run — skipped on retry,
+                            # since a model's daily quota won't refill mid-run
 
 # Groq is only used as a fallback when Gemini's quota is exhausted, so
 # there's no auto-discovery dance — just a sane, fast, JSON-mode-capable
@@ -52,14 +60,17 @@ _GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
 
 class QuotaExhaustedError(RuntimeError):
     """
-    Raised when Gemini returns 429 RESOURCE_EXHAUSTED and no working
-    fallback (Groq) was available either. This is an account/project-level
-    condition (free-tier quota set to 0, billing not linked, or a genuine
-    rate limit) — NOT a problem with any particular video's transcript.
-    Callers should stop processing further videos in the current run
-    rather than retrying each one (they'll all fail identically) and
-    should NOT record this as a per-video "error", since that would
-    misleadingly suggest something is wrong with that specific video.
+    Raised when every Gemini model candidate has failed with a retryable
+    error (429 RESOURCE_EXHAUSTED, or a transient 500/503 server-side
+    error) and no working fallback (Groq) was available either.
+
+    Despite the name, this now also covers transient "model overloaded"
+    5xx errors, not just quota. Either way it's not a problem with any
+    particular video's transcript — callers should stop processing
+    further videos in the current run rather than retrying each one
+    (they'll all fail identically against the same exhausted/overloaded
+    models) and should NOT record this as a per-video "error", since that
+    would misleadingly suggest something is wrong with that specific video.
     """
     pass
 
@@ -100,9 +111,9 @@ def _get_groq_client():
     return _groq_client
 
 
-def _pick_best_model(candidates: list) -> str:
+def _rank_model(name: str):
     """
-    Heuristic ranking, best first:
+    Heuristic ranking key, best first:
       1. Stable releases over preview/experimental ones (less likely to be
          pulled without notice).
       2. "flash" family over "pro" (fast + generous free-tier quota — this
@@ -111,31 +122,38 @@ def _pick_best_model(candidates: list) -> str:
          fallback if that's all that's available).
       4. Newer version numbers first.
     """
-    def rank(name: str):
-        is_unstable = ("preview" in name) or ("exp" in name)
-        is_pro = "pro" in name and "flash" not in name
-        is_lite = "lite" in name
-        return (is_unstable, is_pro, is_lite, name)
-
-    return sorted(candidates, key=rank)[0]
+    is_unstable = ("preview" in name) or ("exp" in name)
+    is_pro = "pro" in name and "flash" not in name
+    is_lite = "lite" in name
+    return (is_unstable, is_pro, is_lite, name)
 
 
-def _discover_model() -> str:
+def _get_model_candidates() -> list:
     """
-    Lists models available to this API key that support generateContent,
-    and picks one via _pick_best_model. Result is cached for the life of
-    the process. Falls back to a hardcoded default only if listing itself
-    fails (e.g. transient network error) so the pipeline degrades gracefully
+    Returns the ranked list (best first) of Gemini models to try for this
+    request. Result is cached for the life of the process.
+
+    If GEMINI_MODEL is set in .env, that's the *only* candidate — an
+    explicit override means "use exactly this model", so there's no
+    auto-fallback across other Gemini models (Groq fallback still applies
+    on top if even that one call fails).
+
+    Otherwise, lists every model available to this API key that supports
+    generateContent and ranks them via _rank_model. Free-tier quotas are
+    generally per-model-per-day, not shared across the whole project, so
+    keeping the full list (instead of picking just one "best" model)
+    lets _call_gemini() move on to the next candidate when one is
+    exhausted, rather than jumping straight to Groq.
+
+    Falls back to a single hardcoded default only if listing itself fails
+    (e.g. transient network error) so the pipeline degrades gracefully
     instead of hard-failing.
     """
-    global _discovered_model
+    global _discovered_models
     if _MODEL_OVERRIDE:
-        print(f"[ai_keywords_utils] GEMINI_MODEL override in .env: using '{_MODEL_OVERRIDE}' "
-              f"(skipping auto-discovery)")
-        return _MODEL_OVERRIDE
-    if _discovered_model:
-        print(f"[ai_keywords_utils] Using cached model choice: {_discovered_model}")
-        return _discovered_model
+        return [_MODEL_OVERRIDE]
+    if _discovered_models is not None:
+        return _discovered_models
 
     client = _get_client()
     candidates = []
@@ -154,19 +172,19 @@ def _discover_model() -> str:
     except Exception as e:
         print(f"[ai_keywords_utils] ❌ Could not list Gemini models ({type(e).__name__}: {e}); "
               f"falling back to gemini-2.5-flash")
-        _discovered_model = "gemini-2.5-flash"
-        return _discovered_model
+        _discovered_models = ["gemini-2.5-flash"]
+        return _discovered_models
 
     if not candidates:
         print("[ai_keywords_utils] ❌ No models support generateContent for this "
               "API key; falling back to gemini-2.5-flash")
-        _discovered_model = "gemini-2.5-flash"
-        return _discovered_model
+        _discovered_models = ["gemini-2.5-flash"]
+        return _discovered_models
 
-    _discovered_model = _pick_best_model(candidates)
-    print(f"[ai_keywords_utils] ✅ Auto-selected Gemini model: {_discovered_model} "
-          f"(out of {len(candidates)} candidate(s))")
-    return _discovered_model
+    _discovered_models = sorted(candidates, key=_rank_model)
+    print(f"[ai_keywords_utils] ✅ Ranked {len(_discovered_models)} candidate model(s); "
+          f"will try in order starting with '{_discovered_models[0]}'")
+    return _discovered_models
 
 
 def _build_timestamped_transcript(segments):
@@ -239,12 +257,44 @@ def _parse_topics_response(raw_text: str, video_duration: float) -> list:
     return cleaned
 
 
-def _call_gemini(user_content: str) -> str:
-    """Returns raw text output, or raises QuotaExhaustedError on a 429."""
+_RETRYABLE_CODES = (429, 500, 503)
+_RETRYABLE_SUBSTRINGS = (
+    "RESOURCE_EXHAUSTED",
+    "UNAVAILABLE",
+    "INTERNAL",
+    "429",
+    "500",
+    "503",
+)
+
+
+def _is_retryable_gemini_error(e: Exception) -> bool:
+    """
+    True for errors where a *different* model (or Groq) might well
+    succeed: 429 quota exhaustion, or a transient 500/503 server-side
+    hiccup on that specific model. False for anything else (bad request,
+    auth failure, etc.) which would fail identically on every model.
+    """
+    code = getattr(e, "code", None)
+    if code in _RETRYABLE_CODES:
+        return True
+    # Only check the front of the message, where the SDK puts the status
+    # code/name, to avoid false positives from those digits/words showing
+    # up incidentally later in an unrelated error detail string.
+    head = str(e)[:40]
+    return any(s in head for s in _RETRYABLE_SUBSTRINGS)
+
+
+def _call_gemini_one(user_content: str, model: str) -> str:
+    """Calls one specific Gemini model. Returns raw text output, or raises
+    QuotaExhaustedError if this model hit a retryable error (429 quota
+    exhaustion, or a transient 500/503 server-side error) — either way,
+    the caller should move on to the next model candidate rather than
+    treating it as a hard failure."""
     client = _get_client()
     try:
         response = client.models.generate_content(
-            model=_discover_model(),
+            model=model,
             contents=user_content,
             config={
                 "system_instruction": _SYSTEM_PROMPT,
@@ -253,22 +303,58 @@ def _call_gemini(user_content: str) -> str:
             },
         )
     except Exception as e:
-        code = getattr(e, "code", None)
-        text = str(e)
-        if code == 429 or "RESOURCE_EXHAUSTED" in text or "429" in text[:20]:
+        if _is_retryable_gemini_error(e):
             raise QuotaExhaustedError(
-                "Gemini API quota exhausted (429 RESOURCE_EXHAUSTED). If the "
-                "error mentions 'free_tier_requests, limit: 0', that means "
-                "this API key's project has no free-tier quota granted at "
-                "all — retrying won't help. Check your plan/billing at "
-                "https://aistudio.google.com/apikey and current usage at "
-                "https://ai.dev/rate-limit; linking a billing account "
-                "usually unlocks quota within minutes. If it's a genuine "
-                "rate limit instead (a nonzero limit you've temporarily "
-                "used up), just wait and re-run."
+                f"Gemini model '{model}' failed with a retryable error: {e}. "
+                "This is either quota exhaustion (429 RESOURCE_EXHAUSTED — "
+                "check https://aistudio.google.com/apikey and "
+                "https://ai.dev/rate-limit; if it mentions "
+                "'free_tier_requests, limit: 0' this model has zero "
+                "free-tier quota for this key and retrying won't help) or a "
+                "transient server-side overload (500/503) that often clears "
+                "up on a different model or a bit later."
             ) from e
         raise
     return response.text
+
+
+def _call_gemini(user_content: str) -> str:
+    """
+    Tries each ranked Gemini model candidate in turn, skipping any already
+    known (this run) to be quota-exhausted. Free-tier quotas are generally
+    per-model-per-day rather than shared across the whole project, so a
+    429 on e.g. gemini-2.0-flash doesn't necessarily mean gemini-2.5-flash-lite
+    is exhausted too — this tries the next candidate before giving up on
+    Gemini entirely and handing off to Groq.
+
+    Raises QuotaExhaustedError only once every candidate model has failed
+    with a retryable error (429 quota exhaustion or transient 500/503)
+    (or if GEMINI_MODEL was set explicitly and that single model failed
+    that way).
+    """
+    candidates = _get_model_candidates()
+    last_err = None
+    for model in candidates:
+        if model in _exhausted_models:
+            continue
+        try:
+            text = _call_gemini_one(user_content, model)
+            if model != candidates[0]:
+                print(f"[ai_keywords_utils] ✅ Succeeded with '{model}' "
+                      f"(earlier candidate(s) failed this run)")
+            return text
+        except QuotaExhaustedError as e:
+            print(f"[ai_keywords_utils] ⚠️  '{model}' failed ({e.__cause__}); "
+                  f"trying next Gemini model candidate…")
+            _exhausted_models.add(model)
+            last_err = e
+            continue
+
+    # Every candidate model is exhausted (or was already marked so from an
+    # earlier call this run) — nothing left to try on the Gemini side.
+    raise last_err or QuotaExhaustedError(
+        "All Gemini model candidates are quota-exhausted for this API key."
+    )
 
 
 def _call_groq(user_content: str) -> str:

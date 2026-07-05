@@ -30,7 +30,7 @@ from redis.exceptions import RedisError
 
 from main import get_redis, _response_from_full, _save_transcript
 from halacha_transcripts import HALACHA_CATEGORY, needs_transcript, process_video_transcript
-from ai_keywords_utils import _discover_model, QuotaExhaustedError
+from ai_keywords_utils import _get_model_candidates, QuotaExhaustedError
 from transcript_utils import TranscriptFetchBlocked
 
 
@@ -62,8 +62,11 @@ async def _connect_with_retry(attempts: int = 3, delay: float = 2.0):
 async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
     print("=== Gemini model discovery ===")
     try:
-        model = _discover_model()
-        print(f"Will use: {model}")
+        candidates = _get_model_candidates()
+        if len(candidates) == 1:
+            print(f"Will use: {candidates[0]}")
+        else:
+            print(f"Will try, in order (moving to the next on 429): {', '.join(candidates)}")
     except Exception as e:
         print(f"❌ Model discovery raised {type(e).__name__}: {e}")
     print("===============================\n")
