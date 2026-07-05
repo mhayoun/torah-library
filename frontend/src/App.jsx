@@ -77,7 +77,7 @@ export default function App() {
     if (!videos) return (
       <div style={s.center}><p style={s.errorText}>קטגוריה לא נמצאה</p></div>
     )
-    return <CategoryPage category={activeTab} playlists={videos} />
+    return <CategoryPage category={activeTab} playlists={videos} years={years} keywords={keywords} />
   }
 
   return (
