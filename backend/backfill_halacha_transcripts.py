@@ -98,6 +98,7 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
         print(f"Processing {len(batch)} video(s) (limit={limit}, dry_run={dry_run})...\n")
 
         done = 0
+        failed = 0
         stopped_early = False
         for i, video in enumerate(batch, 1):
             print(f"[{i}/{len(batch)}] {video.get('title')}  ({video.get('id')})")
@@ -125,6 +126,14 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
                 break
             if ok:
                 done += 1
+            else:
+                failed += 1
+
+            # Running counter — lets you track progress live on a long
+            # batch instead of only finding out success/failure counts
+            # once the whole run finishes.
+            print(f"    …processed so far: {i}/{len(batch)} "
+                  f"(✅ {done} succeeded, ❌ {failed} failed)")
 
             if sleep_max > 0 and i < len(batch):
                 delay = random.uniform(sleep_min, sleep_max)
@@ -144,10 +153,12 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
         await _response_from_full(r, all_videos)
 
         if stopped_early:
-            print(f"\n{done} video(s) saved before stopping early.")
+            print(f"\n{done} video(s) saved before stopping early "
+                  f"({failed} failed out of {i} attempted).")
             return
 
-        print(f"\nDone. {done}/{len(batch)} video(s) successfully processed and saved.")
+        print(f"\nDone. {done}/{len(batch)} video(s) successfully processed and saved "
+              f"({failed} failed).")
         remaining = len(candidates) - len(batch)
         if remaining > 0:
             print(f"{remaining} video(s) still remain — run again to continue the backfill.")

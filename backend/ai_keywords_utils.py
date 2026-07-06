@@ -111,6 +111,19 @@ def _get_groq_client():
     return _groq_client
 
 
+# Models known to permanently reject a request shape this pipeline always
+# sends (system_instruction + JSON mime type) — filtered out at discovery
+# time so we never waste an API call (and a full round-trip's worth of
+# sleep-before-next-video delay) finding this out per-run. Confirmed via
+# a 400 INVALID_ARGUMENT: "Developer instruction is not enabled for
+# models/antigravity-preview-05-2026". If GEMINI_MODEL explicitly pins one
+# of these, that explicit choice is still respected — this list only
+# trims the auto-discovered candidate pool.
+_KNOWN_INCOMPATIBLE_MODELS = {
+    "antigravity-preview-05-2026",
+}
+
+
 def _rank_model(name: str):
     """
     Heuristic ranking key, best first:
@@ -180,6 +193,12 @@ def _get_model_candidates() -> list:
               "API key; falling back to gemini-2.5-flash")
         _discovered_models = ["gemini-2.5-flash"]
         return _discovered_models
+
+    excluded = [name for name in candidates if name in _KNOWN_INCOMPATIBLE_MODELS]
+    if excluded:
+        print(f"[ai_keywords_utils] ⏭️  Excluding {len(excluded)} known-incompatible "
+              f"model(s) (reject system_instruction/JSON mode): {', '.join(excluded)}")
+        candidates = [name for name in candidates if name not in _KNOWN_INCOMPATIBLE_MODELS]
 
     _discovered_models = sorted(candidates, key=_rank_model)
     print(f"[ai_keywords_utils] ✅ Ranked {len(_discovered_models)} candidate model(s); "
@@ -262,26 +281,49 @@ _RETRYABLE_SUBSTRINGS = (
     "RESOURCE_EXHAUSTED",
     "UNAVAILABLE",
     "INTERNAL",
+    "INVALID_ARGUMENT",
     "429",
+    "400",
     "500",
     "503",
 )
+
+# Some candidate models — despite technically supporting generateContent —
+# aren't actually general-purpose text models at all: they're
+# image/audio/video/robotics/agentic preview models (nano-banana-pro,
+# lyria-*, veo-*, gemini-*-image, gemini-*-tts, gemini-*-computer-use,
+# gemini-*-live, gemini-robotics-er-*, antigravity-preview, deep-research-*,
+# etc.) that reject the plain "system_instruction + JSON text" request this
+# pipeline always sends. Each rejects it with its own 400 INVALID_ARGUMENT
+# message — e.g. "Developer instruction is not enabled for models/X", or
+# "This model only supports Interactions API." — and new variants keep
+# showing up as we work through the candidate list. Rather than chase each
+# new message string one at a time, we treat *any* 400 as "this specific
+# model can't do it, move on" — since our request shape never changes, a
+# 400 here always means a model-capability mismatch, not a data problem
+# that would fail identically everywhere. Worst case (a genuinely malformed
+# request) this just means we burn through more candidates before falling
+# through to Groq, instead of silently never trying Groq at all.
+_MODEL_INCOMPATIBLE_CODE = 400
 
 
 def _is_retryable_gemini_error(e: Exception) -> bool:
     """
     True for errors where a *different* model (or Groq) might well
-    succeed: 429 quota exhaustion, or a transient 500/503 server-side
-    hiccup on that specific model. False for anything else (bad request,
-    auth failure, etc.) which would fail identically on every model.
+    succeed: 429 quota exhaustion, a transient 500/503 server-side hiccup,
+    or a 400 (this specific model rejecting a request shape every other
+    candidate accepts fine — see _MODEL_INCOMPATIBLE_CODE above). False
+    only for genuinely unexpected errors (e.g. an auth failure) that would
+    fail identically on every model.
     """
     code = getattr(e, "code", None)
-    if code in _RETRYABLE_CODES:
+    if code in _RETRYABLE_CODES or code == _MODEL_INCOMPATIBLE_CODE:
         return True
+    text = str(e)
     # Only check the front of the message, where the SDK puts the status
     # code/name, to avoid false positives from those digits/words showing
     # up incidentally later in an unrelated error detail string.
-    head = str(e)[:40]
+    head = text[:40]
     return any(s in head for s in _RETRYABLE_SUBSTRINGS)
 
 
@@ -306,13 +348,16 @@ def _call_gemini_one(user_content: str, model: str) -> str:
         if _is_retryable_gemini_error(e):
             raise QuotaExhaustedError(
                 f"Gemini model '{model}' failed with a retryable error: {e}. "
-                "This is either quota exhaustion (429 RESOURCE_EXHAUSTED — "
-                "check https://aistudio.google.com/apikey and "
+                "This is quota exhaustion (429 RESOURCE_EXHAUSTED — check "
+                "https://aistudio.google.com/apikey and "
                 "https://ai.dev/rate-limit; if it mentions "
                 "'free_tier_requests, limit: 0' this model has zero "
-                "free-tier quota for this key and retrying won't help) or a "
-                "transient server-side overload (500/503) that often clears "
-                "up on a different model or a bit later."
+                "free-tier quota for this key and retrying won't help), a "
+                "transient server-side overload (500/503) that often "
+                "clears up on a different model or a bit later, or a "
+                "permanent model-specific incompatibility (400, e.g. an "
+                "experimental/preview model rejecting system_instruction) "
+                "that a different model candidate simply won't hit."
             ) from e
         raise
     return response.text
