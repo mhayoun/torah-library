@@ -29,7 +29,7 @@ rather than on every /api/cours page load.
 from datetime import datetime, timezone
 
 from transcript_utils import fetch_hebrew_transcript, NoHebrewTranscript, TranscriptFetchBlocked
-from ai_keywords_utils import extract_topics, QuotaExhaustedError
+from ai_keywords_utils import extract_topics, QuotaExhaustedError, GeminiUnavailableError
 
 HALACHA_CATEGORY = "הלכה יומית"
 
@@ -85,10 +85,14 @@ def process_video_transcript(video: dict, logger=None) -> tuple[bool, list | Non
 
     try:
         topics = extract_topics(title, segments)
-    except QuotaExhaustedError:
-        # Account/project-level condition, not this video's fault — don't
-        # write a misleading transcript_error onto it. Let the caller
-        # (backfill script / daily sync) decide to stop the batch.
+    except GeminiUnavailableError:
+        # Either a real quota problem (QuotaExhaustedError) or a transient
+        # server-side hiccup (GeminiTransientError) — neither is this
+        # video's fault, so don't write a misleading transcript_error onto
+        # it. `raise` (bare) re-raises the original specific subclass
+        # unchanged, so the caller can tell the two apart and decide:
+        # stop the whole batch (quota) vs. just skip this one and retry
+        # later (transient).
         raise
     except Exception as e:
         video["topics"] = []

@@ -30,7 +30,7 @@ from redis.exceptions import RedisError
 
 from main import get_redis, _response_from_full, _save_transcript
 from halacha_transcripts import HALACHA_CATEGORY, needs_transcript, process_video_transcript
-from ai_keywords_utils import _get_model_candidates, QuotaExhaustedError
+from ai_keywords_utils import _get_model_candidates, QuotaExhaustedError, GeminiTransientError
 from transcript_utils import TranscriptFetchBlocked
 
 
@@ -98,7 +98,6 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
         print(f"Processing {len(batch)} video(s) (limit={limit}, dry_run={dry_run})...\n")
 
         done = 0
-        failed = 0
         stopped_early = False
         for i, video in enumerate(batch, 1):
             print(f"[{i}/{len(batch)}] {video.get('title')}  ({video.get('id')})")
@@ -116,6 +115,12 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
                       f"left off.")
                 stopped_early = True
                 break
+            except GeminiTransientError as e:
+                print(f"\n⚠️  {e}\n   Skipping this video for now — a "
+                      f"server-side hiccup like this often clears up within "
+                      f"seconds, so unlike a real quota problem it's not "
+                      f"worth stopping the whole batch. It'll be retried "
+                      f"next time the script runs.\n")
             except TranscriptFetchBlocked as e:
                 print(f"\n🛑 {e}\n\nStopping this run early — the remaining "
                       f"{len(batch) - i + 1} video(s) in this batch would "
@@ -126,14 +131,6 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
                 break
             if ok:
                 done += 1
-            else:
-                failed += 1
-
-            # Running counter — lets you track progress live on a long
-            # batch instead of only finding out success/failure counts
-            # once the whole run finishes.
-            print(f"    …processed so far: {i}/{len(batch)} "
-                  f"(✅ {done} succeeded, ❌ {failed} failed)")
 
             if sleep_max > 0 and i < len(batch):
                 delay = random.uniform(sleep_min, sleep_max)
@@ -153,12 +150,10 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
         await _response_from_full(r, all_videos)
 
         if stopped_early:
-            print(f"\n{done} video(s) saved before stopping early "
-                  f"({failed} failed out of {i} attempted).")
+            print(f"\n{done} video(s) saved before stopping early.")
             return
 
-        print(f"\nDone. {done}/{len(batch)} video(s) successfully processed and saved "
-              f"({failed} failed).")
+        print(f"\nDone. {done}/{len(batch)} video(s) successfully processed and saved.")
         remaining = len(candidates) - len(batch)
         if remaining > 0:
             print(f"{remaining} video(s) still remain — run again to continue the backfill.")
