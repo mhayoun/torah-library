@@ -59,17 +59,22 @@ async def _connect_with_retry(attempts: int = 3, delay: float = 2.0):
     sys.exit(1)
 
 
-async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
-    print("=== Gemini model discovery ===")
-    try:
-        candidates = _get_model_candidates()
-        if len(candidates) == 1:
-            print(f"Will use: {candidates[0]}")
-        else:
-            print(f"Will try, in order (moving to the next on 429): {', '.join(candidates)}")
-    except Exception as e:
-        print(f"❌ Model discovery raised {type(e).__name__}: {e}")
-    print("===============================\n")
+async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float, provider: str):
+    print(f"=== AI provider: {provider} first "
+          f"(falls back to {'groq' if provider == 'gemini' else 'gemini'} automatically) ===")
+    if provider == "gemini":
+        print("=== Gemini model discovery ===")
+        try:
+            candidates = _get_model_candidates()
+            if len(candidates) == 1:
+                print(f"Will use: {candidates[0]}")
+            else:
+                print(f"Will try, in order (moving to the next on 429): {', '.join(candidates)}")
+        except Exception as e:
+            print(f"❌ Model discovery raised {type(e).__name__}: {e}")
+        print("===============================\n")
+    else:
+        print("Skipping Gemini model discovery — Groq is tried first this run.\n")
 
     r = await _connect_with_retry()
     try:
@@ -104,7 +109,7 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float):
             if dry_run:
                 continue
             try:
-                ok, segments = process_video_transcript(video, logger=True)
+                ok, segments = process_video_transcript(video, logger=True, provider=provider)
                 if segments:
                     await _save_transcript(r, video, segments)
             except QuotaExhaustedError as e:
@@ -179,6 +184,17 @@ if __name__ == "__main__":
                               "actual delay is randomized between "
                               "--sleep-min and --sleep-max each time "
                               "(default: 5)")
+    parser.add_argument("--provider", choices=["gemini", "groq"], default="gemini",
+                         help="Which AI provider to try FIRST for topic "
+                              "extraction (default: gemini). This only "
+                              "changes the order — the other provider is "
+                              "still used automatically as a fallback if "
+                              "the first one fails, exactly like before. "
+                              "E.g. --provider groq tries Groq first and "
+                              "falls back to Gemini if Groq fails or "
+                              "GROQ_API_KEY isn't set; --provider gemini "
+                              "(default) is the original behavior: Gemini "
+                              "first, falling back to Groq if configured.")
     args = parser.parse_args()
 
     if args.sleep_min < 0 or args.sleep_max < 0:
@@ -186,4 +202,4 @@ if __name__ == "__main__":
     if args.sleep_min > args.sleep_max:
         parser.error("--sleep-min cannot be greater than --sleep-max")
 
-    asyncio.run(run(args.limit, args.dry_run, args.sleep_min, args.sleep_max))
+    asyncio.run(run(args.limit, args.dry_run, args.sleep_min, args.sleep_max, args.provider))

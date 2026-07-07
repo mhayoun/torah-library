@@ -384,17 +384,30 @@ def _call_groq(user_content: str) -> str:
     return response.choices[0].message.content
 
 
-def extract_topics(title: str, segments: list) -> list:
+def extract_topics(title: str, segments: list, provider: str = "gemini") -> list:
     """
-    Calls Gemini (primary) — or Groq as an automatic fallback if Gemini's
-    quota is exhausted and GROQ_API_KEY is configured — to extract
-    {keyword, start} topic markers from a Hebrew transcript. Returns a
-    list of dicts, sorted by start time ascending:
+    Extracts {keyword, start} topic markers from a Hebrew transcript,
+    using whichever provider is tried first, with the *other* one as an
+    automatic fallback if the first fails:
+
+      provider="gemini" (default) — Gemini first; falls back to Groq if
+        every Gemini candidate model fails (429 quota or transient
+        server error) AND GROQ_API_KEY is configured.
+      provider="groq" — Groq first; falls back to Gemini (with its own
+        multi-model candidate ranking, see _call_gemini) if the Groq call
+        fails, or if GROQ_API_KEY isn't configured at all.
+
+    Either way, both providers are still attempted before giving up —
+    this parameter only changes which one goes *first*, it never removes
+    the safety net of trying the other one too.
+
+    Returns a list of dicts, sorted by start time ascending:
       [{"keyword": str, "start": float}, ...]
     Returns [] if segments is empty or the model output can't be parsed.
-    Raises GeminiUnavailableError (QuotaExhaustedError or GeminiTransientError)
-    if Gemini couldn't be used and either no Groq fallback is configured,
-    or the Groq call also fails.
+    Raises GeminiUnavailableError (QuotaExhaustedError or
+    GeminiTransientError) if neither provider could be used — e.g.
+    Gemini exhausted and no Groq fallback configured/working, or (when
+    provider="groq") Groq failed and Gemini also failed.
     """
     if not segments:
         return []
@@ -409,8 +422,18 @@ def extract_topics(title: str, segments: list) -> list:
         f"תמלול עם חותמות זמן:\n{transcript_block}"
     )
 
+    if provider == "groq":
+        raw_text = _extract_topics_groq_first(user_content)
+    else:
+        raw_text = _extract_topics_gemini_first(user_content)
+
+    return _parse_topics_response(raw_text, video_duration)
+
+
+def _extract_topics_gemini_first(user_content: str) -> str:
+    """Gemini first, Groq as fallback. Original/default behavior."""
     try:
-        raw_text = _call_gemini(user_content)
+        return _call_gemini(user_content)
     except GeminiUnavailableError as gemini_err:
         groq_client = _get_groq_client()
         if groq_client is None:
@@ -418,10 +441,36 @@ def extract_topics(title: str, segments: list) -> list:
         print(f"[ai_keywords_utils] ⚠️  Gemini unavailable ({type(gemini_err).__name__}) — "
               f"falling back to Groq ({_GROQ_MODEL})")
         try:
-            raw_text = _call_groq(user_content)
+            return _call_groq(user_content)
         except Exception as groq_err:
             print(f"[ai_keywords_utils] ❌ Groq fallback also failed "
                   f"({type(groq_err).__name__}: {groq_err})")
             raise gemini_err from groq_err
 
-    return _parse_topics_response(raw_text, video_duration)
+
+def _extract_topics_groq_first(user_content: str) -> str:
+    """
+    Groq first, Gemini as fallback — mirror image of the default path,
+    used when provider="groq" is requested.
+
+    If GROQ_API_KEY isn't configured at all, there's nothing to try
+    first, so this just goes straight to Gemini (with a heads-up print)
+    rather than failing outright.
+    """
+    groq_client = _get_groq_client()
+    if groq_client is None:
+        print("[ai_keywords_utils] ⚠️  provider='groq' requested but GROQ_API_KEY "
+              "isn't configured — using Gemini instead")
+        return _call_gemini(user_content)
+
+    try:
+        return _call_groq(user_content)
+    except Exception as groq_err:
+        print(f"[ai_keywords_utils] ⚠️  Groq call failed "
+              f"({type(groq_err).__name__}: {groq_err}) — falling back to Gemini")
+        try:
+            return _call_gemini(user_content)
+        except GeminiUnavailableError as gemini_err:
+            print(f"[ai_keywords_utils] ❌ Gemini fallback also failed "
+                  f"({type(gemini_err).__name__}: {gemini_err})")
+            raise gemini_err from groq_err

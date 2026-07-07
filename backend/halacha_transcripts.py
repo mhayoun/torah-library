@@ -43,7 +43,7 @@ def needs_transcript(video: dict) -> bool:
     return video.get("transcript_status") not in ("done", "no_captions")
 
 
-def process_video_transcript(video: dict, logger=None) -> tuple[bool, list | None]:
+def process_video_transcript(video: dict, logger=None, provider: str = "gemini") -> tuple[bool, list | None]:
     """
     Mutates `video` in place with the lightweight topic-marker fields
     (see module docstring). Returns (ok, segments):
@@ -55,6 +55,11 @@ def process_video_transcript(video: dict, logger=None) -> tuple[bool, list | Non
                  failed. The caller is responsible for persisting this
                  (e.g. to the `transcript:<video_id>` Redis key) — it is
                  NOT written onto `video` / cours_full.
+      provider — which AI provider to try first for topic extraction:
+                 "gemini" (default) or "groq". Whichever one isn't tried
+                 first is still used as an automatic fallback if the
+                 first one fails — see extract_topics() in
+                 ai_keywords_utils.py.
     """
     vid_id = video.get("id")
     title = video.get("title", "")
@@ -84,7 +89,7 @@ def process_video_transcript(video: dict, logger=None) -> tuple[bool, list | Non
         return False, None
 
     try:
-        topics = extract_topics(title, segments)
+        topics = extract_topics(title, segments, provider=provider)
     except GeminiUnavailableError:
         # Either a real quota problem (QuotaExhaustedError) or a transient
         # server-side hiccup (GeminiTransientError) — neither is this
