@@ -68,6 +68,36 @@ _discovered_groq_models = None  # ranked list of ALL usable candidates, cached o
 _exhausted_groq_models = set()  # models that hit 429 this run — skipped on
                                  # retry, mirrors _exhausted_models for Gemini
 
+# Groq's catalog mixes plain instruct/chat models in with things that
+# are NOT suitable for this task at all — speech-to-text (whisper),
+# text-to-speech voices (orpheus), prompt-injection/content classifiers
+# (prompt-guard, safeguard), and agentic tool-use systems (compound,
+# compound-mini) that browse/call tools on their own rather than just
+# answering from the given transcript. These are filtered out entirely
+# in _get_groq_model_candidates() rather than merely ranked low, since
+# trying them wastes a request and some may not even honor
+# response_format the way a plain chat model does.
+_GROQ_EXCLUDED_SUBSTRINGS = (
+    "whisper", "tts", "orpheus", "guard", "safeguard", "compound", "embedding",
+)
+
+# Known-good instruct/chat models, best first — checked before the
+# generic size-based heuristic below. llama-3.3-70b-versatile is listed
+# first since it's been the reliable default for this task; the rest are
+# other large, general-purpose instruct models with roomy context
+# windows. Anything Groq adds later that isn't in this list still gets
+# picked up automatically by the heuristic tail (larger open models will
+# usually still rank in that model's favor).
+_GROQ_PREFERRED_ORDER = [
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-120b",
+    "qwen/qwen3-32b",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "openai/gpt-oss-20b",
+    "qwen/qwen3.6-27b",
+    "llama-3.1-8b-instant",
+]
+
 # Used only if GROQ_MODEL isn't set AND live discovery via
 # client.models.list() fails (e.g. transient network error) — keeps a
 # couple of known-good, JSON-mode-capable models as a last resort so the
@@ -141,6 +171,21 @@ class GroqTransientError(GroqUnavailableError):
     the model as exhausted for the rest of the run, since a transient
     hiccup now says nothing about whether the same model will fail again
     on the very next video.
+    """
+    pass
+
+
+class GroqContextLengthError(GroqUnavailableError):
+    """
+    Raised when a Groq model rejects the request because the transcript
+    is too long for *that specific model's* context window (400
+    context_length_exceeded). This says nothing about the model's quota
+    or health — a different candidate with a larger context window (e.g.
+    llama-3.3-70b-versatile) may well handle the very same request fine.
+    _call_groq() moves on to the next candidate the same way it does for
+    a 429, and — like a transient error — does NOT permanently mark the
+    model exhausted for the rest of the run, since the *next* video might
+    have a short-enough transcript for this same model to handle.
     """
     pass
 
@@ -259,18 +304,23 @@ def _get_model_candidates() -> list:
 
 def _rank_groq_model(name: str):
     """
-    Heuristic ranking key for Groq models, best first:
-      1. Non-preview releases over "preview"/"exp" ones (less likely to
-         be pulled without notice) — same idea as Gemini's ranking.
-      2. Larger parameter-count models ("70b" etc.) over smaller/"instant"
-         ones (better extraction quality; instant is still a fine, fast
-         fallback).
-      3. Plain versioned names sort after that alphabetically, which
-         tends to put newer generations first (e.g. "3.3" before "3.1").
+    Ranking key for Groq models, best first:
+      1. Anything in _GROQ_PREFERRED_ORDER (known-good instruct/chat
+         models) sorts first, in that list's order.
+      2. Everything else: non-preview releases before "preview"/"exp"
+         ones, then larger parameter counts first (extracted from names
+         like "70b"/"27b"/"7b" via regex — a plain substring check like
+         `"8b" in name` used to miss models such as "allam-2-7b", which
+         let a small model with a narrow context window sort ahead of
+         much larger ones and fail on longer transcripts).
     """
+    if name in _GROQ_PREFERRED_ORDER:
+        return (0, _GROQ_PREFERRED_ORDER.index(name))
+
     is_unstable = ("preview" in name) or ("exp" in name)
-    is_small = ("8b" in name) or ("instant" in name) or ("mini" in name)
-    return (is_unstable, is_small, name)
+    size_match = re.search(r"(\d+(?:\.\d+)?)b\b", name.lower())
+    size = float(size_match.group(1)) if size_match else 0.0
+    return (1, is_unstable, -size, name)
 
 
 def _get_groq_model_candidates() -> list:
@@ -284,10 +334,14 @@ def _get_groq_model_candidates() -> list:
 
     Otherwise, lists every model available to this API key (Groq's
     client exposes the same models.list() shape as most OpenAI-compatible
-    SDKs) and ranks them via _rank_groq_model. Groq's free tier also
+    SDKs), drops anything matching _GROQ_EXCLUDED_SUBSTRINGS (speech-to-
+    text, text-to-speech, safety classifiers, agentic tool-use systems —
+    none of which are plain instruct/chat models suited to this task),
+    and ranks what's left via _rank_groq_model. Groq's free tier also
     enforces per-model rate limits, so keeping the full list lets
-    _call_groq() move on to the next candidate when one is rate-limited,
-    instead of failing the whole request immediately.
+    _call_groq() move on to the next candidate when one is rate-limited
+    (or its context window is too small for a given transcript), instead
+    of failing the whole request immediately.
 
     Falls back to _GROQ_FALLBACK_CANDIDATES only if listing itself fails
     (e.g. transient network error, or this Groq SDK version doesn't
@@ -315,9 +369,15 @@ def _get_groq_model_candidates() -> list:
             if not name:
                 continue
             active = getattr(m, "active", True)
-            print(f"[ai_keywords_utils]   - {name}"
-                  f"{'' if active else '  (inactive)'}")
-            if active:
+            excluded = any(s in name.lower() for s in _GROQ_EXCLUDED_SUBSTRINGS)
+            if excluded:
+                tag = "  (excluded — not a chat/instruct model for this task)"
+            elif not active:
+                tag = "  (inactive)"
+            else:
+                tag = ""
+            print(f"[ai_keywords_utils]   - {name}{tag}")
+            if active and not excluded:
                 candidates.append(name)
     except Exception as e:
         print(f"[ai_keywords_utils] ❌ Could not list Groq models ({type(e).__name__}: {e}); "
@@ -326,7 +386,7 @@ def _get_groq_model_candidates() -> list:
         return _discovered_groq_models
 
     if not candidates:
-        print(f"[ai_keywords_utils] ❌ No active models for this Groq API key; "
+        print(f"[ai_keywords_utils] ❌ No usable chat models for this Groq API key; "
               f"falling back to {', '.join(_GROQ_FALLBACK_CANDIDATES)}")
         _discovered_groq_models = list(_GROQ_FALLBACK_CANDIDATES)
         return _discovered_groq_models
@@ -499,7 +559,8 @@ def _call_gemini(user_content: str) -> str:
 
 def _call_groq_one(user_content: str, model: str) -> str:
     """Calls one specific Groq model. Returns raw text output, or raises
-    GroqRateLimitError on a 429, or GroqTransientError on a temporary
+    GroqRateLimitError on a 429, GroqContextLengthError on a 400
+    context_length_exceeded, or GroqTransientError on a temporary
     server-side error (5xx)."""
     client = _get_groq_client()
     try:
@@ -522,6 +583,12 @@ def _call_groq_one(user_content: str, model: str) -> str:
                 "limits are generally per-model, so another candidate model "
                 "may still work right now."
             ) from e
+        if code == 400 and ("context_length_exceeded" in text or "reduce the length" in text.lower()):
+            raise GroqContextLengthError(
+                f"Groq model '{model}' can't fit this transcript in its "
+                "context window. A candidate with a larger context window "
+                "may still handle it fine."
+            ) from e
         if code is not None and 500 <= code < 600:
             raise GroqTransientError(
                 f"Groq model '{model}' is temporarily unavailable "
@@ -537,11 +604,13 @@ def _call_groq(user_content: str) -> str:
     known (this run) to be rate-limited. Mirrors _call_gemini(): a 429 on
     one model doesn't necessarily mean every model on this API key is
     rate-limited, so this tries the next candidate before giving up on
-    Groq entirely.
+    Groq entirely. A context-length error is handled the same way — the
+    transcript may simply be too long for *that* model, not a sign
+    anything is actually wrong with it.
 
-    Raises GroqUnavailableError (GroqRateLimitError or GroqTransientError,
-    whichever hit last) only once every candidate model has failed (or if
-    GROQ_MODEL was set explicitly and that single model failed).
+    Raises GroqUnavailableError (whichever error hit last) only once
+    every candidate model has failed (or if GROQ_MODEL was set explicitly
+    and that single model failed).
     """
     candidates = _get_groq_model_candidates()
     last_err = None
@@ -552,12 +621,19 @@ def _call_groq(user_content: str) -> str:
             text = _call_groq_one(user_content, model)
             if model != candidates[0]:
                 print(f"[ai_keywords_utils] ✅ Succeeded with Groq model '{model}' "
-                      f"(earlier candidate(s) rate-limited this run)")
+                      f"(earlier candidate(s) failed this run)")
             return text
         except GroqRateLimitError as e:
             print(f"[ai_keywords_utils] ⚠️  Groq '{model}' rate-limited (429); "
                   f"trying next Groq model candidate…")
             _exhausted_groq_models.add(model)  # won't recover this run
+            last_err = e
+            continue
+        except GroqContextLengthError as e:
+            print(f"[ai_keywords_utils] ⚠️  Groq '{model}' context window too small "
+                  f"for this transcript; trying next Groq model candidate…")
+            # Not added to _exhausted_groq_models: a shorter transcript on
+            # the *next* video might fit this same model just fine.
             last_err = e
             continue
         except GroqTransientError as e:
@@ -568,8 +644,8 @@ def _call_groq(user_content: str) -> str:
             last_err = e
             continue
 
-    # Every candidate model failed (rate limit or transient) — nothing
-    # left to try on the Groq side this call.
+    # Every candidate model failed (rate limit, context length, or
+    # transient) — nothing left to try on the Groq side this call.
     raise last_err or GroqRateLimitError(
         "All Groq model candidates are rate-limited for this API key."
     )
