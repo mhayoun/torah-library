@@ -24,10 +24,16 @@ Fallback provider: Groq (optional). Only once *every* Gemini model
 candidate has 429'd (see QuotaExhaustedError) AND GROQ_API_KEY is set in
 the environment, extract_topics() automatically retries the same request
 on Groq instead of failing the video. Get a free key at
-https://console.groq.com/keys. Override the model with GROQ_MODEL in
-.env (default: llama-3.3-70b-versatile). If GROQ_API_KEY isn't set, the
-original Gemini QuotaExhaustedError is raised as before — Groq is purely
-an optional safety net, not a replacement.
+https://console.groq.com/keys.
+
+Like Gemini, Groq isn't pinned to a single model by default: if
+GROQ_MODEL isn't set in .env, every model available to this API key
+(via client.models.list()) is tried in ranked order, moving to the next
+candidate on a 429 — same rationale as Gemini, since Groq's free tier
+also enforces per-model rate limits rather than one shared limit. Set
+GROQ_MODEL to pin to exactly one model instead. If GROQ_API_KEY isn't
+set at all, the original Gemini QuotaExhaustedError is raised as before
+— Groq is purely an optional safety net, not a replacement.
 """
 
 import os
@@ -52,10 +58,21 @@ _discovered_models = None  # ranked list of ALL usable candidates, cached once
 _exhausted_models = set()  # models that hit 429 this run — skipped on retry,
                             # since a model's daily quota won't refill mid-run
 
-# Groq is only used as a fallback when Gemini's quota is exhausted, so
-# there's no auto-discovery dance — just a sane, fast, JSON-mode-capable
-# default that can be overridden.
-_GROQ_MODEL = os.environ.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+# GROQ_MODEL in .env always wins if set — pins to exactly one model, same
+# convention as GEMINI_MODEL. Otherwise every model available to this API
+# key is discovered and ranked, and _call_groq() tries them in order,
+# moving to the next candidate on a 429 (see _GROQ_FALLBACK_CANDIDATES for
+# what's used if discovery itself fails).
+_GROQ_MODEL_OVERRIDE = os.environ.get("GROQ_MODEL")
+_discovered_groq_models = None  # ranked list of ALL usable candidates, cached once
+_exhausted_groq_models = set()  # models that hit 429 this run — skipped on
+                                 # retry, mirrors _exhausted_models for Gemini
+
+# Used only if GROQ_MODEL isn't set AND live discovery via
+# client.models.list() fails (e.g. transient network error) — keeps a
+# couple of known-good, JSON-mode-capable models as a last resort so the
+# pipeline still has more than one thing to try.
+_GROQ_FALLBACK_CANDIDATES = ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
 
 
 class GeminiUnavailableError(RuntimeError):
@@ -93,6 +110,37 @@ class GeminiTransientError(GeminiUnavailableError):
     it the same way as a 429 for the purposes of trying the next
     candidate model, but does NOT mark the model as exhausted for the
     rest of the run.
+    """
+    pass
+
+
+class GroqUnavailableError(RuntimeError):
+    """
+    Base class: raised when Groq could not fulfill the request through
+    any candidate model. Mirrors GeminiUnavailableError. Callers catch
+    this base class rather than the two subclasses individually, since
+    both currently get the same treatment (move to the next provider).
+    """
+    pass
+
+
+class GroqRateLimitError(GroqUnavailableError):
+    """
+    Raised when every Groq candidate model returned a 429 rate-limit
+    error. Like QuotaExhaustedError for Gemini, this is an account/key
+    -level condition, not a problem with this particular video.
+    """
+    pass
+
+
+class GroqTransientError(GroqUnavailableError):
+    """
+    Raised when a Groq model returns a temporary server-side error (5xx)
+    rather than a rate-limit problem. _call_groq() moves to the next
+    candidate model the same way it does for a 429, but does NOT mark
+    the model as exhausted for the rest of the run, since a transient
+    hiccup now says nothing about whether the same model will fail again
+    on the very next video.
     """
     pass
 
@@ -207,6 +255,86 @@ def _get_model_candidates() -> list:
     print(f"[ai_keywords_utils] ✅ Ranked {len(_discovered_models)} candidate model(s); "
           f"will try in order starting with '{_discovered_models[0]}'")
     return _discovered_models
+
+
+def _rank_groq_model(name: str):
+    """
+    Heuristic ranking key for Groq models, best first:
+      1. Non-preview releases over "preview"/"exp" ones (less likely to
+         be pulled without notice) — same idea as Gemini's ranking.
+      2. Larger parameter-count models ("70b" etc.) over smaller/"instant"
+         ones (better extraction quality; instant is still a fine, fast
+         fallback).
+      3. Plain versioned names sort after that alphabetically, which
+         tends to put newer generations first (e.g. "3.3" before "3.1").
+    """
+    is_unstable = ("preview" in name) or ("exp" in name)
+    is_small = ("8b" in name) or ("instant" in name) or ("mini" in name)
+    return (is_unstable, is_small, name)
+
+
+def _get_groq_model_candidates() -> list:
+    """
+    Returns the ranked list (best first) of Groq models to try for this
+    request. Result is cached for the life of the process. Mirrors
+    _get_model_candidates() for Gemini.
+
+    If GROQ_MODEL is set in .env, that's the *only* candidate — an
+    explicit override means "use exactly this model".
+
+    Otherwise, lists every model available to this API key (Groq's
+    client exposes the same models.list() shape as most OpenAI-compatible
+    SDKs) and ranks them via _rank_groq_model. Groq's free tier also
+    enforces per-model rate limits, so keeping the full list lets
+    _call_groq() move on to the next candidate when one is rate-limited,
+    instead of failing the whole request immediately.
+
+    Falls back to _GROQ_FALLBACK_CANDIDATES only if listing itself fails
+    (e.g. transient network error, or this Groq SDK version doesn't
+    support models.list()) so the pipeline degrades gracefully instead
+    of hard-failing.
+    """
+    global _discovered_groq_models
+    if _GROQ_MODEL_OVERRIDE:
+        return [_GROQ_MODEL_OVERRIDE]
+    if _discovered_groq_models is not None:
+        return _discovered_groq_models
+
+    client = _get_groq_client()
+    if client is None:
+        # No API key configured — nothing to discover; caller checks for
+        # a None client before ever reaching here, but guard anyway.
+        _discovered_groq_models = list(_GROQ_FALLBACK_CANDIDATES)
+        return _discovered_groq_models
+
+    candidates = []
+    try:
+        print("[ai_keywords_utils] Listing Groq models available for this API key…")
+        for m in client.models.list().data:
+            name = getattr(m, "id", None) or getattr(m, "name", None)
+            if not name:
+                continue
+            active = getattr(m, "active", True)
+            print(f"[ai_keywords_utils]   - {name}"
+                  f"{'' if active else '  (inactive)'}")
+            if active:
+                candidates.append(name)
+    except Exception as e:
+        print(f"[ai_keywords_utils] ❌ Could not list Groq models ({type(e).__name__}: {e}); "
+              f"falling back to {', '.join(_GROQ_FALLBACK_CANDIDATES)}")
+        _discovered_groq_models = list(_GROQ_FALLBACK_CANDIDATES)
+        return _discovered_groq_models
+
+    if not candidates:
+        print(f"[ai_keywords_utils] ❌ No active models for this Groq API key; "
+              f"falling back to {', '.join(_GROQ_FALLBACK_CANDIDATES)}")
+        _discovered_groq_models = list(_GROQ_FALLBACK_CANDIDATES)
+        return _discovered_groq_models
+
+    _discovered_groq_models = sorted(candidates, key=_rank_groq_model)
+    print(f"[ai_keywords_utils] ✅ Ranked {len(_discovered_groq_models)} candidate Groq "
+          f"model(s); will try in order starting with '{_discovered_groq_models[0]}'")
+    return _discovered_groq_models
 
 
 def _build_timestamped_transcript(segments):
@@ -369,19 +497,82 @@ def _call_gemini(user_content: str) -> str:
     )
 
 
-def _call_groq(user_content: str) -> str:
-    """Returns raw text output from the Groq fallback model."""
+def _call_groq_one(user_content: str, model: str) -> str:
+    """Calls one specific Groq model. Returns raw text output, or raises
+    GroqRateLimitError on a 429, or GroqTransientError on a temporary
+    server-side error (5xx)."""
     client = _get_groq_client()
-    response = client.chat.completions.create(
-        model=_GROQ_MODEL,
-        messages=[
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user", "content": user_content},
-        ],
-        response_format={"type": "json_object"},
-        temperature=0.2,
-    )
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.2,
+        )
+    except Exception as e:
+        code = getattr(e, "status_code", None)
+        text = str(e)
+        if code == 429 or "rate_limit" in text.lower() or "429" in text[:20]:
+            raise GroqRateLimitError(
+                f"Groq model '{model}' rate-limited (429). Check your usage "
+                "at https://console.groq.com/settings/limits — free-tier "
+                "limits are generally per-model, so another candidate model "
+                "may still work right now."
+            ) from e
+        if code is not None and 500 <= code < 600:
+            raise GroqTransientError(
+                f"Groq model '{model}' is temporarily unavailable "
+                f"({type(e).__name__}: {e}). Often resolves within seconds."
+            ) from e
+        raise
     return response.choices[0].message.content
+
+
+def _call_groq(user_content: str) -> str:
+    """
+    Tries each ranked Groq model candidate in turn, skipping any already
+    known (this run) to be rate-limited. Mirrors _call_gemini(): a 429 on
+    one model doesn't necessarily mean every model on this API key is
+    rate-limited, so this tries the next candidate before giving up on
+    Groq entirely.
+
+    Raises GroqUnavailableError (GroqRateLimitError or GroqTransientError,
+    whichever hit last) only once every candidate model has failed (or if
+    GROQ_MODEL was set explicitly and that single model failed).
+    """
+    candidates = _get_groq_model_candidates()
+    last_err = None
+    for model in candidates:
+        if model in _exhausted_groq_models:
+            continue
+        try:
+            text = _call_groq_one(user_content, model)
+            if model != candidates[0]:
+                print(f"[ai_keywords_utils] ✅ Succeeded with Groq model '{model}' "
+                      f"(earlier candidate(s) rate-limited this run)")
+            return text
+        except GroqRateLimitError as e:
+            print(f"[ai_keywords_utils] ⚠️  Groq '{model}' rate-limited (429); "
+                  f"trying next Groq model candidate…")
+            _exhausted_groq_models.add(model)  # won't recover this run
+            last_err = e
+            continue
+        except GroqTransientError as e:
+            print(f"[ai_keywords_utils] ⚠️  Groq '{model}' temporarily unavailable "
+                  f"(server-side); trying next Groq model candidate…")
+            # Not added to _exhausted_groq_models: transient now doesn't
+            # mean this model will still be down for the *next* video.
+            last_err = e
+            continue
+
+    # Every candidate model failed (rate limit or transient) — nothing
+    # left to try on the Groq side this call.
+    raise last_err or GroqRateLimitError(
+        "All Groq model candidates are rate-limited for this API key."
+    )
 
 
 def extract_topics(title: str, segments: list, provider: str = "gemini") -> list:
@@ -439,7 +630,7 @@ def _extract_topics_gemini_first(user_content: str) -> str:
         if groq_client is None:
             raise  # no fallback configured — surface the original error
         print(f"[ai_keywords_utils] ⚠️  Gemini unavailable ({type(gemini_err).__name__}) — "
-              f"falling back to Groq ({_GROQ_MODEL})")
+              f"falling back to Groq")
         try:
             return _call_groq(user_content)
         except Exception as groq_err:

@@ -30,7 +30,10 @@ from redis.exceptions import RedisError
 
 from main import get_redis, _response_from_full, _save_transcript
 from halacha_transcripts import HALACHA_CATEGORY, needs_transcript, process_video_transcript
-from ai_keywords_utils import _get_model_candidates, QuotaExhaustedError, GeminiTransientError
+from ai_keywords_utils import (
+    _get_model_candidates, _get_groq_model_candidates,
+    QuotaExhaustedError, GeminiTransientError,
+)
 from transcript_utils import TranscriptFetchBlocked
 
 
@@ -74,7 +77,17 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float, pro
             print(f"❌ Model discovery raised {type(e).__name__}: {e}")
         print("===============================\n")
     else:
-        print("Skipping Gemini model discovery — Groq is tried first this run.\n")
+        print("=== Groq model discovery ===")
+        try:
+            groq_candidates = _get_groq_model_candidates()
+            if len(groq_candidates) == 1:
+                print(f"Will use: {groq_candidates[0]}")
+            else:
+                print(f"Will try, in order (moving to the next on 429): {', '.join(groq_candidates)}")
+        except Exception as e:
+            print(f"❌ Groq model discovery raised {type(e).__name__}: {e}")
+        print("===============================\n")
+
 
     r = await _connect_with_retry()
     try:
