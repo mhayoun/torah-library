@@ -117,6 +117,22 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float, pro
 
         done = 0
         stopped_early = False
+
+        async def _checkpoint(reason: str):
+            """
+            Persist cours_full + rebuild cours_response/keywords_list RIGHT
+            NOW, not just once at the very end of the whole batch. Without
+            this, an interrupted run (timeout, dropped connection, Ctrl-C,
+            killed terminal) loses every topic extracted so far in memory —
+            transcript:<id> keys are already safe (saved per-video above),
+            but cours_full/cours_response/keywords_list would otherwise
+            only be written after ALL videos in the batch finish, which can
+            be hours away with --sleep-min/--sleep-max delays.
+            """
+            await r.set("cours_full", json.dumps(all_videos, ensure_ascii=False))
+            await _response_from_full(r, all_videos)
+            print(f"    💾 checkpoint saved ({reason})")
+
         for i, video in enumerate(batch, 1):
             print(f"[{i}/{len(batch)}] {video.get('title')}  ({video.get('id')})")
             if dry_run:
@@ -125,6 +141,10 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float, pro
                 ok, segments = process_video_transcript(video, logger=True, provider=provider)
                 if segments:
                     await _save_transcript(r, video, segments)
+                # Save progress after EVERY video (not just at the end of
+                # the whole batch) so a long-running batch never loses
+                # already-extracted topics if it gets interrupted partway.
+                await _checkpoint(f"video {i}/{len(batch)}")
             except QuotaExhaustedError as e:
                 print(f"\n🛑 {e}\n\nStopping this run early — the remaining "
                       f"{len(batch) - i + 1} video(s) in this batch would "
