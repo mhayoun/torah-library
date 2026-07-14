@@ -372,22 +372,22 @@ def fetch_videos_for_playlist(
         if not all_items:
             return videos, mismatched
 
-        # ── Phase 2: scan in REVERSE — newest additions are at the end ────────
-        # Walk backwards through all_items; collect unknowns; stop at first
-        # known ID (everything before it in the playlist is already stored).
-        new_items = []
-        for item in reversed(all_items):
-            vid_id = item.get("contentDetails", {}).get("videoId")
-            if not vid_id:
-                continue
-            if vid_id in existing_ids:
-                if DEBUG:
-                    print(f"   [DEBUG] Known ID {vid_id} — stopping reverse scan.")
-                break   # hit the boundary between known and new
-            new_items.append(item)
+        # ── Phase 2: find every item not already known ─────────────────────
+        # No early-stop / boundary assumption: all_items was already fully
+        # paginated above (that's where the real API cost was paid), so
+        # simply checking every single item against existing_ids costs
+        # nothing extra beyond a few thousand dict lookups. This is correct
+        # no matter WHERE in the playlist a new video was inserted — front,
+        # back, or shuffled into the middle by the owner — instead of
+        # assuming new videos only ever land at one edge.
+        new_items = [
+            item for item in all_items
+            if item.get("contentDetails", {}).get("videoId")
+            and item["contentDetails"]["videoId"] not in existing_ids
+        ]
 
         if DEBUG:
-            print(f"   [DEBUG] {len(new_items)} new item(s) found after reverse scan.")
+            print(f"   [DEBUG] {len(new_items)} new item(s) found (full scan, no early-stop).")
 
         if not new_items:
             return videos, mismatched

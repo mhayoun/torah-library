@@ -1,8 +1,6 @@
 cd backend
 # clean redis
 ./util_clean_redis.sh
-# build from scratch
-curl -X POST http://localhost:8000/api/sync
 
 #Pour tester juste la découverte +
 #le parcours des playlists (sans rien écrire dans Redis) :
@@ -18,7 +16,18 @@ curl -i https://rav-aaron-butbul.vercel.app/api/sync \
   -H "Authorization: Bearer 90d03b45b7306005c2ec37d3eb4fcc6475957c4fd95317ed9fefebac94a6b6af"
 
 #run backend localhost
+cd backend
+source venv/bin/activate
 uvicorn main:app --reload --port 8000
+# sync
+curl -X POST http://localhost:8000/api/sync
+
 
 #run frontend localhost
 npm run dev
+
+# tail crontab
+tail -f /home/moshe/backfill_cron.log
+grep CRON /var/log/syslog | tail -20
+journalctl -u cron --since "10 minutes ago"
+
