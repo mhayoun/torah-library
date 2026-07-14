@@ -11,11 +11,11 @@ python debug_sync.py --verbose
 source venv/bin/activate
 python3 backfill_halacha_transcripts.py --limit 1
 
-# simulate cron
+# simulate cron (backend) from real (frontend)
 curl -i https://rav-aaron-butbul.vercel.app/api/sync \
   -H "Authorization: Bearer 90d03b45b7306005c2ec37d3eb4fcc6475957c4fd95317ed9fefebac94a6b6af"
 
-#run backend localhost
+#simulate cron from localhost
 cd backend
 source venv/bin/activate
 uvicorn main:app --reload --port 8000
