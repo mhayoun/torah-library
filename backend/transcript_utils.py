@@ -20,6 +20,7 @@ from youtube_transcript_api._errors import (
     TranscriptsDisabled,
     NoTranscriptFound,
     VideoUnavailable,
+    VideoUnplayable,
 )
 
 try:
@@ -216,6 +217,19 @@ def fetch_hebrew_transcript(video_id: str):
         raise NoHebrewTranscript(f"Captions are disabled for video {video_id}")
     except VideoUnavailable:
         raise NoHebrewTranscript(f"Video {video_id} is unavailable")
+    except VideoUnplayable as e:
+        # Covers private videos, region-locked videos, removed-for-ToS
+        # videos, etc. This is a different exception class from
+        # VideoUnavailable (added in youtube-transcript-api 1.x) — it was
+        # previously falling through to the bare `raise` below, which
+        # left it as an unrecognized error. That's wrong: it got recorded
+        # as transcript_status="error" instead of "no_captions", so
+        # needs_transcript() kept picking the same permanently-private
+        # video back up on every single run forever, burning a slot in
+        # every --limit batch for a video that will never succeed.
+        raise NoHebrewTranscript(
+            f"Video {video_id} is unplayable ({e.reason or 'no reason given'})"
+        )
     except Exception as e:
         if _is_blocked_error(e):
             raise TranscriptFetchBlocked(
@@ -240,6 +254,11 @@ def fetch_hebrew_transcript(video_id: str):
             raise NoHebrewTranscript(f"Captions are disabled for video {video_id}")
         except VideoUnavailable:
             raise NoHebrewTranscript(f"Video {video_id} is unavailable")
+        except VideoUnplayable as e:
+            # Same reasoning as the fast-path branch above.
+            raise NoHebrewTranscript(
+                f"Video {video_id} is unplayable ({e.reason or 'no reason given'})"
+            )
         except Exception as e:
             if _is_blocked_error(e):
                 raise TranscriptFetchBlocked(
