@@ -168,6 +168,22 @@ def compute_hebraic_year_from_date(upload_date):
 
 # ── helpers ───────────────────────────────────────────────────────────────────
 
+# YouTube's API doesn't omit private/deleted videos from playlistItems
+# responses - it returns a stub item instead, with snippet.title set to
+# the literal English string "Private video" or "Deleted video" (this
+# happens regardless of the API's requested locale) and no real content
+# (no thumbnails, no real description). videos().list() typically omits
+# such videos entirely for non-owners, but can occasionally return the
+# same stub, so this check is applied wherever a title is read from
+# either endpoint.
+_UNAVAILABLE_TITLES = {"Private video", "Deleted video"}
+
+
+def _is_unavailable_item(snippet):
+    """True if this playlistItems/videos snippet is a private/deleted stub."""
+    return (snippet or {}).get("title") in _UNAVAILABLE_TITLES
+
+
 def iso_date(raw):
     if not raw:
         return None
@@ -384,7 +400,17 @@ def fetch_videos_for_playlist(
             item for item in all_items
             if item.get("contentDetails", {}).get("videoId")
             and item["contentDetails"]["videoId"] not in existing_ids
+            and not _is_unavailable_item(item.get("snippet"))
         ]
+
+        skipped_unavailable = sum(
+            1 for item in all_items
+            if item.get("contentDetails", {}).get("videoId")
+            and item["contentDetails"]["videoId"] not in existing_ids
+            and _is_unavailable_item(item.get("snippet"))
+        )
+        if skipped_unavailable and DEBUG:
+            print(f"   [DEBUG] ⛔ Skipped {skipped_unavailable} private/deleted stub item(s).")
 
         if DEBUG:
             print(f"   [DEBUG] {len(new_items)} new item(s) found (full scan, no early-stop).")
@@ -585,6 +611,11 @@ def fetch_videos_by_ids(
                 continue  # video deleted/private/unavailable - just skip it
 
             snippet = item.get("snippet", {})
+            if _is_unavailable_item(snippet):
+                if DEBUG:
+                    print(f"   [DEBUG] ⛔ Skipped private/deleted stub video ({vid_id}).")
+                continue
+
             title = snippet.get("title")
 
             try:
