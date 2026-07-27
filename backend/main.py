@@ -112,6 +112,13 @@ FULL_SCAN_ONLY_URLS = [
     "https://www.youtube.com/@nissimtrabelsy3957/playlists",
 ]
 
+# Some video/playlist titles on the source channel use the wrong first name
+# for the rabbi (a mistake in the uploader's own title template, not
+# something we control). Corrected on every sync so it doesn't matter
+# whether a given upload already has it fixed on YouTube's side.
+WRONG_RABBI_NAME = "הרב אברהם בוטבול"
+CORRECT_RABBI_NAME = "הרב אהרון בוטבול"
+
 
 # ── App ───────────────────────────────────────────────────────────────────────
 
@@ -313,6 +320,11 @@ async def _build_response(r) -> dict:
     from playlist_utils import find_matching_categories
     from playlist_videos_utils import extract_hebraic_year
     for v in all_videos:
+        if WRONG_RABBI_NAME in v.get("title", ""):
+            v["title"] = v["title"].replace(WRONG_RABBI_NAME, CORRECT_RABBI_NAME)
+        if WRONG_RABBI_NAME in v.get("playlist", ""):
+            v["playlist"] = v["playlist"].replace(WRONG_RABBI_NAME, CORRECT_RABBI_NAME)
+
         title = v.get("title", "")
         current_cat = v.get("category", "אחר")
         matches = find_matching_categories(title)
