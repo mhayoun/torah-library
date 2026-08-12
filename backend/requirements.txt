@@ -8,3 +8,5 @@ pyluach>=2.2.0
 youtube-transcript-api>=1.0.0
 google-genai>=1.0.0
 groq>=0.11.0
+pdfplumber>=0.11.0
+python-docx>=1.1.0

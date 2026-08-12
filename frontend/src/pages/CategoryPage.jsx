@@ -1,9 +1,12 @@
-import React, { useState, useMemo } from 'react'
+import React, { useState, useMemo, useEffect } from 'react'
 import { Search } from 'lucide-react'
 import VideoCard from '../components/VideoCard.jsx'
+import DocSearchResults from '../components/DocSearchResults.jsx'
+import { useDocSearch } from '../hooks/useDocSearch.js'
 
 const ALL_YEARS = 'כל השנים'
 const TOPIC_CATEGORY = 'הלכה יומית'
+const WEEKLY_LESSON_CATEGORY = 'השיעור השבועי'
 
 export default function CategoryPage({ category, playlists: videos, years = [], keywords = [] }) {
   // "playlists" prop name kept for App.jsx compatibility — it now holds a flat video array
@@ -14,11 +17,25 @@ export default function CategoryPage({ category, playlists: videos, years = [], 
   // show the keyword-suggestions dropdown there (both would be misleading).
   const hasTopics = category === TOPIC_CATEGORY
 
+  // Only השיעור השבועי videos ever have a matched PDF/DOCX handout (see
+  // drive_documents_utils.py) — no point querying GET /api/search-docs
+  // from any other category page, it would always come back empty.
+  const isWeeklyLesson = category === WEEKLY_LESSON_CATEGORY
+
   // ── Search bar state (same idea as HomePage's quick-search, but scoped
   // to this category — no category selector needed since we're already
   // inside one) ────────────────────────────────────────────────────────
   const [query, setQuery] = useState('')
   const [year, setYear]   = useState(ALL_YEARS)
+
+  // Document-content search — debounced since, unlike SearchPage, there's
+  // no explicit "search" button here: it fires as the person types.
+  const { docResults, docSearchLoading, docSearched, runDocSearch } = useDocSearch()
+  useEffect(() => {
+    if (!isWeeklyLesson) return
+    runDocSearch(query, { debounce: true })
+  }, [query, isWeeklyLesson, runDocSearch])
+  const hasDocHits = isWeeklyLesson && docSearched && !docSearchLoading && docResults.length > 0
 
   const handleSearchKey = (e) => { if (e.key === 'Enter') e.preventDefault() }
 
@@ -111,20 +128,29 @@ export default function CategoryPage({ category, playlists: videos, years = [], 
         </div>
       </div>
 
-      {filtered.length === 0
-        ? <p style={styles.empty}>
-            {query.trim() || year !== ALL_YEARS
-              ? 'לא נמצאו תוצאות. נסו מילות חיפוש אחרות.'
-              : 'אין שיעורים בקטגוריה זו'}
-          </p>
-        : (
-          <div style={styles.grid}>
-            {filtered.map(({ video: v, topicMatches }) => (
-              <VideoCard key={v.id} video={{ ...v, category }} matchedTopics={topicMatches} />
-            ))}
-          </div>
-        )
-      }
+      {/* Document-content hits (GET /api/search-docs) come FIRST and take
+          priority — the regular video grid below only renders as a
+          fallback when this finds nothing. Only ever attempted on
+          השיעור השבועי, the sole category with matched handouts. */}
+      {isWeeklyLesson && (
+        <DocSearchResults results={docResults} loading={docSearchLoading} allVideos={videos} />
+      )}
+
+      {!hasDocHits && (
+        filtered.length === 0
+          ? <p style={styles.empty}>
+              {query.trim() || year !== ALL_YEARS
+                ? 'לא נמצאו תוצאות. נסו מילות חיפוש אחרות.'
+                : 'אין שיעורים בקטגוריה זו'}
+            </p>
+          : (
+            <div style={styles.grid}>
+              {filtered.map(({ video: v, topicMatches }) => (
+                <VideoCard key={v.id} video={{ ...v, category }} matchedTopics={topicMatches} />
+              ))}
+            </div>
+          )
+      )}
     </div>
   )
 }

@@ -1,6 +1,8 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react'
 import { Search, Filter, SlidersHorizontal } from 'lucide-react'
 import VideoCard from '../components/VideoCard.jsx'
+import DocSearchResults from '../components/DocSearchResults.jsx'
+import { useDocSearch } from '../hooks/useDocSearch.js'
 import { dlog } from '../utils/debug.js'
 
 const ALL_LABEL = 'כל הקטגוריות'
@@ -12,6 +14,12 @@ export default function SearchPage({ allVideos, categories, years, keywords = []
   const [year, setYear]         = useState(initialParams?.year || ALL_YEARS)
   const [searched, setSearched] = useState(false)
   const [loading, setLoading]   = useState(false)
+
+  // Full-text search over the extracted PDF/DOCX handout content (see
+  // doc_text_utils.py backend side) — shown ABOVE the regular title/topic
+  // matches below, and takes priority: the regular grid only renders as a
+  // fallback when this finds nothing (see the render logic further down).
+  const { docResults, docSearchLoading, docSearched, runDocSearch } = useDocSearch()
 
   // If the person arrived here via the HomePage quick-search bar, run the
   // search immediately with the params they picked there.
@@ -30,6 +38,7 @@ export default function SearchPage({ allVideos, categories, years, keywords = []
     setYear(initialParams.year || ALL_YEARS)
     setLoading(true)
     setSearched(false)
+    runDocSearch(initialParams.query || '')
     const t = setTimeout(() => {
       dlog('SearchPage', 'initialParams search complete')
       setSearched(true)
@@ -39,7 +48,7 @@ export default function SearchPage({ allVideos, categories, years, keywords = []
       dlog('SearchPage', 'initialParams effect cleanup (clearing timer)')
       clearTimeout(t)
     }
-  }, [initialParams])
+  }, [initialParams, runDocSearch])
 
   const results = useMemo(() => {
     if (!searched) return []
@@ -76,15 +85,25 @@ export default function SearchPage({ allVideos, categories, years, keywords = []
     [results]
   )
 
+  // Document-content hits take priority over the regular title/topic grid:
+  // when the handout text search actually found something, show ONLY
+  // that (compact snippets + links) — the title-match grid becomes a
+  // fallback, shown only once the doc search has finished and come up
+  // empty (or wasn't applicable, e.g. no text query at all).
+  const hasDocHits = docSearched && !docSearchLoading && docResults.length > 0
+  const showRegularGrid = !loading && results.length > 0 && !hasDocHits
+  const showNoResults = !loading && searched && !docSearchLoading && !hasDocHits && results.length === 0
+
   const handleSearch = useCallback(() => {
     dlog('SearchPage', 'manual search button clicked', { query, category, year })
     setLoading(true)
     setSearched(false)
+    runDocSearch(query)
     setTimeout(() => {
       setSearched(true)
       setLoading(false)
     }, 400)
-  }, [query, category, year])
+  }, [query, category, year, runDocSearch])
 
   const handleKey = (e) => { if (e.key === 'Enter') handleSearch() }
 
@@ -171,14 +190,19 @@ export default function SearchPage({ allVideos, categories, years, keywords = []
         </div>
       )}
 
-      {!loading && searched && results.length === 0 && (
+      {showNoResults && (
         <div style={styles.empty}>
           <div style={styles.emptyIcon}>📜</div>
           <p style={styles.emptyText}>לא נמצאו תוצאות. נסו מילות חיפוש אחרות.</p>
         </div>
       )}
 
-      {!loading && results.length > 0 && (
+      {/* Document-content hits (GET /api/search-docs) come FIRST and take
+          priority — the regular title/topic grid below only renders as a
+          fallback when this finds nothing (see showRegularGrid). */}
+      <DocSearchResults results={docResults} loading={docSearchLoading} allVideos={allVideos} />
+
+      {showRegularGrid && (
         <>
           <div style={styles.resultsHeader}>
             <span style={styles.resultCount}>

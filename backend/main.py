@@ -92,6 +92,7 @@ import ssl
 from playlist_utils import get_raw_playlists, categorize_playlists, SKIPPED_PLAYLIST_IDS
 from playlist_videos_utils import enrich_structured_playlists
 from debug_logger import DebugLogger
+from doc_text_utils import normalize_hebrew
 
 # ── Config ────────────────────────────────────────────────────────────────────
 
@@ -338,6 +339,13 @@ async def _build_response(r) -> dict:
         if not v.get("hebraic_year"):
             v["hebraic_year"] = extract_hebraic_year(title) or extract_hebraic_year(v.get("playlist", ""))
 
+        # Fix up "P0D" durations stored before parse_duration() learned to
+        # treat that (date-based, no "PT" part) YouTube value as unknown —
+        # seen on livestream VODs whose final duration hadn't settled yet
+        # when first fetched.
+        if v.get("duration") == "P0D":
+            v["duration"] = "Unknown"
+
     # 5b. Auto-attach Hebrew transcript + AI topic markers (keyword + start
     #     position) for newly-added הלכה יומית videos only. Existing videos
     #     that predate this feature are handled separately by
@@ -371,6 +379,67 @@ async def _build_response(r) -> dict:
             if skipped > 0:
                 print(f"[transcript] {skipped} video(s) deferred — run "
                       f"backfill_halacha_transcripts.py to catch up.")
+
+    # 5c. Check Drive for a written PDF/DOCX handout matching each
+    #     השיעור השבועי video. Runs for two groups every sync: (a) videos
+    #     that are new this sync, and (b) any older weekly-lesson video
+    #     that still has no `documents` field — this covers a handout
+    #     being uploaded to Drive a few days AFTER its video (a common
+    #     lag), which would otherwise never be picked up since it's no
+    #     longer "new" by the next sync. The Drive folder tree is walked
+    #     once regardless of how many videos match, so checking group (b)
+    #     costs nothing extra on top of group (a).
+    WEEKLY_LESSON_CATEGORY = "השיעור השבועי"
+    weekly_videos_to_check = [
+        v for v in all_videos
+        if v.get("category") == WEEKLY_LESSON_CATEGORY
+        and (v.get("id") in new_ids or "documents" not in v)
+    ]
+    if weekly_videos_to_check:
+        try:
+            from drive_documents_utils import build_video_documents_index
+            doc_index = build_video_documents_index()
+            matched = 0
+            for v in weekly_videos_to_check:
+                docs = doc_index.get(v["id"])
+                if docs and (docs.get("pdf") or docs.get("docx")):
+                    v["documents"] = docs
+                    matched += 1
+            print(f"[documents] {matched}/{len(weekly_videos_to_check)} "
+                  f"{WEEKLY_LESSON_CATEGORY} video(s) matched a PDF/DOCX "
+                  f"handout this sync")
+        except Exception as e:
+            print(f"[documents] Drive lookup failed, skipping this sync: {e}")
+
+    # 5d. Refresh title/duration/view_count/thumbnail for recently-uploaded
+    #     videos (see refresh_recent_videos_metadata's docstring — this is
+    #     what keeps a livestream's title/stats from staying frozen at
+    #     whatever YouTube reported the moment it was first synced).
+    try:
+        from playlist_videos_utils import refresh_recent_videos_metadata
+        refreshed = refresh_recent_videos_metadata(all_videos, logger=logger)
+        if refreshed:
+            print(f"[metadata-refresh] updated {refreshed} recently-uploaded video(s)")
+    except Exception as e:
+        print(f"[metadata-refresh] failed, skipping this sync: {e}")
+
+    # 5e. Extract text from newly-matched PDF/DOCX handouts (see
+    #     doc_text_utils.py) so their content is searchable via
+    #     GET /api/search-docs. Capped by MAX_AUTO_DOC_TEXT per sync since
+    #     downloading+parsing a PDF is much heavier than the Drive
+    #     metadata lookup in step 5c — backfill_document_texts.py is meant
+    #     to catch up any videos deferred here.
+    try:
+        from doc_text_utils import build_doc_texts_index
+        existing_raw = await r.get("doc_texts_all")
+        existing_texts = json.loads(existing_raw) if existing_raw else {}
+        max_new = int(os.environ.get("MAX_AUTO_DOC_TEXT", "5"))
+        doc_texts, extracted = build_doc_texts_index(all_videos, existing_texts, max_new=max_new)
+        if extracted:
+            await r.set("doc_texts_all", json.dumps(doc_texts, ensure_ascii=False))
+            print(f"[doc-text] extracted text for {extracted} handout(s) this sync")
+    except Exception as e:
+        print(f"[doc-text] extraction failed, skipping this sync: {e}")
 
     # Rebuild catalogue from the full merged flat list
     catalogue: dict[str, list] = {}
@@ -510,6 +579,79 @@ async def get_keywords():
             await r.aclose()
     except Exception as e:
         return {"error": str(e), "type": type(e).__name__}
+
+
+@app.get("/api/search-docs")
+async def search_docs(q: str):
+    """
+    Full-text search over the extracted PDF/DOCX handout content (see
+    doc_text_utils.py) for השיעור השבועי videos. Reads the aggregated
+    doc_texts_all Redis key ({video_id: text}) — small enough (one entry
+    per handout, plain text) to load and scan in one request; no separate
+    search index needed at this corpus size.
+
+    Case-sensitive-agnostic-for-Hebrew substring match (Hebrew has no
+    case, but niqqud is stripped from both sides via normalize_hebrew so
+    a query without vowel points still matches vocalized text). Returns
+    one snippet per matching video — the first occurrence only, with 3
+    whole LINES of context on each side of the matching line (a "line" is
+    whatever extract_pdf_text/extract_docx_text considered one line/
+    paragraph when the handout's text was extracted).
+
+    Response: { "query": q, "results": [ { "video_id", "snippet",
+    "match_offset", "match_len" }, ... ] }. `snippet` contains "\n"
+    between its lines; match_offset/match_len are character offsets into
+    `snippet` (counting those "\n"s) that let the frontend highlight
+    exactly the matched substring without re-searching it client-side.
+    """
+    q = (q or "").strip()
+    if not q:
+        return {"query": q, "results": []}
+
+    try:
+        r = await get_redis()
+        try:
+            raw = await r.get("doc_texts_all")
+            texts: dict = json.loads(raw) if raw else {}
+        finally:
+            await r.aclose()
+    except Exception as e:
+        return {"error": str(e), "type": type(e).__name__}
+
+    CONTEXT_LINES = 3
+    q_norm = normalize_hebrew(q)
+    results = []
+    for video_id, text in texts.items():
+        # Normalize per-line, not on the whole joined text — normalize_hebrew
+        # collapses ALL whitespace including newlines, which would destroy
+        # the line boundaries we need for line-based context.
+        norm_lines = [normalize_hebrew(line) for line in text.split("\n")]
+
+        match_line_idx = match_idx_in_line = None
+        for i, line in enumerate(norm_lines):
+            idx = line.find(q_norm)
+            if idx != -1:
+                match_line_idx, match_idx_in_line = i, idx
+                break
+        if match_line_idx is None:
+            continue
+
+        start_i = max(0, match_line_idx - CONTEXT_LINES)
+        end_i = min(len(norm_lines), match_line_idx + CONTEXT_LINES + 1)
+        context_lines = norm_lines[start_i:end_i]
+        snippet = "\n".join(context_lines)
+        # Every preceding context line contributes its length + 1 (the "\n"
+        # that joins it to the next line) before the matched line starts.
+        match_offset = sum(len(l) + 1 for l in norm_lines[start_i:match_line_idx]) + match_idx_in_line
+
+        results.append({
+            "video_id": video_id,
+            "snippet": snippet,
+            "match_offset": match_offset,
+            "match_len": len(q_norm),
+        })
+
+    return {"query": q, "results": results}
 
 
 @app.get("/api/transcript/{video_id}")

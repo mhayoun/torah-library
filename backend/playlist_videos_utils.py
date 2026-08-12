@@ -1,7 +1,7 @@
 import os
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from googleapiclient.discovery import build
 from pyluach import dates as heb_dates
 
@@ -199,9 +199,104 @@ def parse_duration(iso):
         return "Unknown"
     m = re.match(r"PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?", iso)
     if not m:
-        return iso
+        # YouTube returns a date-based duration like "P0D" (no "PT" time
+        # part at all) for some livestream VODs whose final duration
+        # hadn't settled yet when fetched — not a real length to display.
+        return "Unknown"
     h, mn, s = (int(x or 0) for x in m.groups())
     return f"{h}:{mn:02d}:{s:02d}" if h else f"{mn}:{s:02d}"
+
+
+RECENT_METADATA_REFRESH_DAYS = 30
+
+
+def refresh_recent_videos_metadata(videos: list, days: int = RECENT_METADATA_REFRESH_DAYS, logger=None) -> int:
+    """
+    Re-fetches title/duration/view_count/thumbnail from YouTube for every
+    video uploaded within the last `days` days, updating those fields in
+    place on the matching dicts in `videos`.
+
+    Why this exists: a video's metadata is otherwise only ever fetched
+    ONCE, the first time it's seen as new (see enrich_structured_playlists
+    / fetch_videos_by_ids) — anything YouTube changes afterwards stays
+    frozen in cours_full forever. This bites livestreams specifically:
+    their title is often edited post-publish to add the actual topic
+    (the auto-generated live title is generic), and duration/view_count
+    can still be provisional (e.g. "P0D") right when a stream just ended.
+    Re-checking a rolling recent window on every sync is cheap
+    (videos.list batches up to 50 IDs per call, ~1 quota unit each) and
+    keeps the catalogue accurate without rescanning everything.
+
+    Returns the number of videos actually updated.
+    """
+    if not API_KEY:
+        return 0
+
+    cutoff = datetime.now(timezone.utc) - timedelta(days=days)
+    by_id: dict[str, dict] = {}
+    for v in videos:
+        ud, vid_id = v.get("upload_date"), v.get("id")
+        if not ud or not vid_id:
+            continue
+        try:
+            dt = datetime.fromisoformat(ud)
+        except ValueError:
+            continue
+        if dt >= cutoff:
+            by_id[vid_id] = v
+
+    if not by_id:
+        return 0
+
+    youtube = build("youtube", "v3", developerKey=API_KEY)
+    ids = list(by_id.keys())
+    updated = 0
+
+    for i in range(0, len(ids), 50):
+        chunk = ids[i:i + 50]
+        try:
+            resp = youtube.videos().list(
+                part="snippet,contentDetails,statistics",
+                id=",".join(chunk),
+            ).execute()
+        except Exception as e:
+            print(f"[metadata-refresh] batch failed (IDs {chunk[0]}..{chunk[-1]}): {e}")
+            if logger:
+                logger.log_video_error(
+                    playlist_url="", playlist_title="",
+                    extra=f"metadata refresh batch failed: {e}",
+                )
+            continue
+
+        for item in resp.get("items", []):
+            v = by_id.get(item["id"])
+            if not v:
+                continue
+            snippet = item.get("snippet", {})
+
+            new_title = snippet.get("title")
+            if new_title and new_title != v.get("title"):
+                v["title"] = new_title
+                v["hebraic_year"] = (
+                    extract_hebraic_year(new_title)
+                    or extract_hebraic_year(v.get("playlist", ""))
+                    or v.get("hebraic_year")
+                )
+
+            thumbs = snippet.get("thumbnails", {})
+            new_thumb = (thumbs.get("medium") or thumbs.get("default") or {}).get("url")
+            if new_thumb:
+                v["thumbnail"] = new_thumb
+
+            v["duration"] = parse_duration(item.get("contentDetails", {}).get("duration", ""))
+
+            view_count = item.get("statistics", {}).get("viewCount")
+            if view_count is not None:
+                v["view_count"] = int(view_count)
+
+            updated += 1
+
+    return updated
 
 
 def load_cached_videos_map(filename=OUTPUT_FILE):

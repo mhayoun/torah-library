@@ -85,6 +85,13 @@ export default function VideoCard({ video, matchedTopics = [] }) {
 
   const allTopics = Array.isArray(video.topics) ? video.topics : []
 
+  // video.documents — {pdf: {...}|null, docx: {...}|null}, attached by the
+  // backend sync when a matching handout was found in the Drive folder for
+  // this video (השיעור השבועי only, see drive_documents_utils.py).
+  const pdfDoc = video.documents?.pdf || null
+  const docxDoc = video.documents?.docx || null
+  const hasDocs = !!(pdfDoc || docxDoc)
+
   return (
     <>
       <article style={styles.card} onClick={() => openAt(null)}>
@@ -99,6 +106,11 @@ export default function VideoCard({ video, matchedTopics = [] }) {
           </div>
           {video.duration && video.duration !== 'Unknown' && (
             <span style={styles.durationBadge}>{video.duration}</span>
+          )}
+          {hasDocs && (
+            <span style={styles.docBadge} title="חומר כתוב מצורף לשיעור">
+              <FileText size={12} />
+            </span>
           )}
         </div>
 
@@ -199,6 +211,44 @@ export default function VideoCard({ video, matchedTopics = [] }) {
                       <span>{t.keyword}</span>
                     </button>
                   ))}
+                </div>
+              </div>
+            )}
+
+            {/* Written handout (PDF/DOCX) matched to this video via the
+                Drive folder scan — see drive_documents_utils.py. Only
+                present for השיעור השבועי videos that have one. */}
+            {hasDocs && (
+              <div style={styles.docsSection}>
+                <div style={styles.docsSectionHeader}>
+                  <FileText size={13} color="#B8860B" />
+                  <span>חומר כתוב לשיעור</span>
+                </div>
+                <div style={styles.docsButtons}>
+                  {pdfDoc && (
+                    <a
+                      href={pdfDoc.view_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={styles.docButton}
+                      onClick={e => e.stopPropagation()}
+                    >
+                      <FileText size={14} style={{ marginLeft: 6 }} />
+                      פתח PDF
+                    </a>
+                  )}
+                  {docxDoc && (
+                    <a
+                      href={docxDoc.view_url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      style={styles.docButton}
+                      onClick={e => e.stopPropagation()}
+                    >
+                      <FileText size={14} style={{ marginLeft: 6 }} />
+                      פתח Word
+                    </a>
+                  )}
                 </div>
               </div>
             )}
@@ -389,6 +439,41 @@ const styles = {
     flexShrink: 0,
     minWidth: 36,
   },
+  docsSection: {
+    marginBottom: 20,
+    background: '#F5F0E8',
+    border: '1px solid rgba(184,134,11,.15)',
+    borderRadius: 8,
+    padding: '12px 14px',
+  },
+  docsSectionHeader: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    fontSize: '.8rem',
+    fontWeight: 600,
+    color: '#1C1610',
+    fontFamily: "'Heebo', sans-serif",
+    marginBottom: 10,
+  },
+  docsButtons: {
+    display: 'flex',
+    gap: 10,
+    flexWrap: 'wrap',
+  },
+  docButton: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    background: 'rgba(184,134,11,.12)',
+    border: '1px solid rgba(184,134,11,.35)',
+    color: '#8B6500',
+    fontSize: '.8rem',
+    fontWeight: 600,
+    fontFamily: "'Heebo', sans-serif",
+    padding: '7px 14px',
+    borderRadius: 6,
+    cursor: 'pointer',
+  },
   transcriptSection: {
     marginBottom: 20,
     border: '1px solid rgba(184,134,11,.15)',
@@ -509,6 +594,19 @@ const styles = {
     padding: '2px 6px',
     borderRadius: 4,
     fontFamily: "'Heebo', sans-serif",
+  },
+  docBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    width: 22,
+    height: 22,
+    borderRadius: '50%',
+    background: 'rgba(184,134,11,.9)',
+    color: '#F5F0E8',
   },
   body: {
     padding: '14px 16px 16px',
