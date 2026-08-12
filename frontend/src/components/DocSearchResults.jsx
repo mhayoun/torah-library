@@ -1,40 +1,53 @@
 import React from 'react'
 import { FileText, ExternalLink } from 'lucide-react'
 
-// Renders one hit from GET /api/search-docs: the matching line (3 lines
-// of context above/below, highlighted) plus a direct link to the PDF/DOCX
-// and to the video itself — deliberately compact (no embedded VideoCard/
-// player here), since this is meant to sit above the regular video
-// results as a fast "jump straight to the paragraph that matched" list.
+// Splits `snippet` into plain-text/<mark> nodes per `matches` (a list of
+// {offset, len} spans, sorted ascending, non-overlapping — see
+// GET /api/search-docs) and turns its "\n" line separators into <br/>,
+// so every occurrence of every query word visible in the snippet gets
+// highlighted, not just a single span.
+function renderHighlightedSnippet(snippet, matches) {
+  const nodes = []
+  let cursor = 0
+  let key = 0
+
+  const pushText = (text) => {
+    if (!text) return
+    const parts = text.split('\n')
+    parts.forEach((part, i) => {
+      if (part) nodes.push(<React.Fragment key={key++}>{part}</React.Fragment>)
+      if (i < parts.length - 1) nodes.push(<br key={key++} />)
+    })
+  }
+
+  for (const m of (matches || [])) {
+    if (m.offset > cursor) pushText(snippet.slice(cursor, m.offset))
+    nodes.push(
+      <mark key={key++} style={styles.highlight}>
+        {snippet.slice(m.offset, m.offset + m.len)}
+      </mark>
+    )
+    cursor = Math.max(cursor, m.offset + m.len)
+  }
+  pushText(snippet.slice(cursor))
+  return nodes
+}
+
+// Renders one hit from GET /api/search-docs: a few lines of context
+// around the query words' closest occurrence together, highlighted,
+// plus a direct link to the PDF/DOCX and to the video itself —
+// deliberately compact (no embedded VideoCard/player here), since this
+// is meant to sit above the regular video results as a fast "jump
+// straight to the paragraph that matched" list.
 function DocSearchHit({ result, video }) {
   const docLink = video.documents?.pdf || video.documents?.docx || null
-  const lines = result.snippet.split('\n')
-
-  let consumed = 0
-  const renderedLines = lines.map((line, i) => {
-    const lineStart = consumed
-    const lineEnd = lineStart + line.length
-    consumed = lineEnd + 1 // +1 for the '\n' separator consumed between lines
-
-    const hasMatch = result.match_offset >= lineStart && result.match_offset < lineEnd
-    if (!hasMatch) {
-      return <span key={i}>{line}<br /></span>
-    }
-    const localOffset = result.match_offset - lineStart
-    const before = line.slice(0, localOffset)
-    const match = line.slice(localOffset, localOffset + result.match_len)
-    const after = line.slice(localOffset + result.match_len)
-    return (
-      <span key={i}>
-        {before}<mark style={styles.highlight}>{match}</mark>{after}<br />
-      </span>
-    )
-  })
 
   return (
     <div style={styles.item}>
       <div style={styles.videoTitle}>{video.title}</div>
-      <p style={styles.snippet} dir="rtl">{renderedLines}</p>
+      <p style={styles.snippet} dir="rtl">
+        {renderHighlightedSnippet(result.snippet, result.matches)}
+      </p>
       <div style={styles.links}>
         {docLink && (
           <a href={docLink.view_url} target="_blank" rel="noopener noreferrer" style={styles.link}>

@@ -581,6 +581,72 @@ async def get_keywords():
         return {"error": str(e), "type": type(e).__name__}
 
 
+def _find_all_positions(haystack: str, needle: str) -> list:
+    """All start positions of `needle` in `haystack` (non-overlapping scan)."""
+    positions = []
+    start = 0
+    while True:
+        idx = haystack.find(needle, start)
+        if idx == -1:
+            break
+        positions.append(idx)
+        start = idx + 1
+    return positions
+
+
+def _smallest_window_covering_all_terms(term_positions: list) -> tuple | None:
+    """
+    term_positions: one sorted position-list per query term (in the SAME
+    full text). Every list must be non-empty (checked by the caller — that
+    "AND" requirement is what makes a document match at all for a
+    multi-word query). Returns (window_start, window_end) — the smallest
+    span of the text (by character distance) that contains at least one
+    occurrence of EVERY term — via the standard "smallest range covering
+    one element from each list" sliding-window algorithm. For a single
+    term this always returns that term's first occurrence, distance 0 —
+    same behavior as the old single-word-only version of this endpoint.
+    """
+    events = sorted(
+        (pos, term_idx)
+        for term_idx, positions in enumerate(term_positions)
+        for pos in positions
+    )
+    n_terms = len(term_positions)
+    counts = [0] * n_terms
+    covered = 0
+    left = 0
+    best = None  # (window_start, window_end)
+
+    for right, (pos_r, term_r) in enumerate(events):
+        if counts[term_r] == 0:
+            covered += 1
+        counts[term_r] += 1
+
+        while covered == n_terms:
+            pos_l, term_l = events[left]
+            width = pos_r - pos_l
+            if best is None or width < (best[1] - best[0]):
+                best = (pos_l, pos_r)
+            counts[term_l] -= 1
+            if counts[term_l] == 0:
+                covered -= 1
+            left += 1
+
+    return best
+
+
+def _line_index_at(norm_lines: list, pos: int) -> int:
+    """Which line (index into norm_lines) a character position falls on,
+    given the lines were joined with "\n" to form the text pos is into."""
+    cursor = 0
+    for i, line in enumerate(norm_lines):
+        line_end = cursor + len(line)
+        if pos <= line_end:
+            return i
+        cursor = line_end + 1  # +1 for the "\n"
+    return len(norm_lines) - 1
+
+
 @app.get("/api/search-docs")
 async def search_docs(q: str):
     """
@@ -590,19 +656,27 @@ async def search_docs(q: str):
     per handout, plain text) to load and scan in one request; no separate
     search index needed at this corpus size.
 
+    Multi-word queries use AND semantics — every distinct word in `q`
+    must appear SOMEWHERE in the document (not necessarily adjacent, not
+    necessarily in that order) for it to match at all. Among matching
+    documents, results are ordered by proximity: the one where the query
+    words appear closest together (see _smallest_window_covering_all_terms)
+    is returned first. The snippet is built around that closest cluster:
+    3 whole LINES of context on each side of whichever lines the cluster
+    spans (a "line" is whatever extract_pdf_text/extract_docx_text
+    considered one line/paragraph when the handout's text was extracted).
+
     Case-sensitive-agnostic-for-Hebrew substring match (Hebrew has no
-    case, but niqqud is stripped from both sides via normalize_hebrew so
-    a query without vowel points still matches vocalized text). Returns
-    one snippet per matching video — the first occurrence only, with 3
-    whole LINES of context on each side of the matching line (a "line" is
-    whatever extract_pdf_text/extract_docx_text considered one line/
-    paragraph when the handout's text was extracted).
+    case, but niqqud is stripped via normalize_hebrew so a query without
+    vowel points still matches vocalized text).
 
     Response: { "query": q, "results": [ { "video_id", "snippet",
-    "match_offset", "match_len" }, ... ] }. `snippet` contains "\n"
-    between its lines; match_offset/match_len are character offsets into
-    `snippet` (counting those "\n"s) that let the frontend highlight
-    exactly the matched substring without re-searching it client-side.
+    "matches": [ {"offset", "len"}, ... ] }, ... ] }, sorted closest-
+    proximity first. `snippet` contains "\n" between its lines; each
+    entry in `matches` is a character span (offset/len) into `snippet` —
+    every visible occurrence of any query word in the snippet, not just
+    the ones that formed the closest cluster — so the frontend can
+    highlight every one of them without re-searching client-side.
     """
     q = (q or "").strip()
     if not q:
@@ -619,39 +693,52 @@ async def search_docs(q: str):
         return {"error": str(e), "type": type(e).__name__}
 
     CONTEXT_LINES = 3
-    q_norm = normalize_hebrew(q)
-    results = []
+    # Dedupe (preserving order) so a repeated word in the query doesn't
+    # require two SEPARATE occurrences of it to "cover" two term slots.
+    terms = list(dict.fromkeys(normalize_hebrew(q).split()))
+    if not terms:
+        return {"query": q, "results": []}
+
+    scored_results = []
     for video_id, text in texts.items():
-        # Normalize per-line, not on the whole joined text — normalize_hebrew
-        # collapses ALL whitespace including newlines, which would destroy
-        # the line boundaries we need for line-based context.
         norm_lines = [normalize_hebrew(line) for line in text.split("\n")]
+        full_text = "\n".join(norm_lines)
 
-        match_line_idx = match_idx_in_line = None
-        for i, line in enumerate(norm_lines):
-            idx = line.find(q_norm)
-            if idx != -1:
-                match_line_idx, match_idx_in_line = i, idx
-                break
-        if match_line_idx is None:
-            continue
+        term_positions = [_find_all_positions(full_text, t) for t in terms]
+        if any(not positions for positions in term_positions):
+            continue  # AND semantics: every term must appear somewhere
 
-        start_i = max(0, match_line_idx - CONTEXT_LINES)
-        end_i = min(len(norm_lines), match_line_idx + CONTEXT_LINES + 1)
-        context_lines = norm_lines[start_i:end_i]
-        snippet = "\n".join(context_lines)
-        # Every preceding context line contributes its length + 1 (the "\n"
-        # that joins it to the next line) before the matched line starts.
-        match_offset = sum(len(l) + 1 for l in norm_lines[start_i:match_line_idx]) + match_idx_in_line
+        window_start, window_end = _smallest_window_covering_all_terms(term_positions)
+        distance = window_end - window_start
 
-        results.append({
+        start_line = _line_index_at(norm_lines, window_start)
+        end_line = _line_index_at(norm_lines, window_end)
+        ctx_start_line = max(0, start_line - CONTEXT_LINES)
+        ctx_end_line = min(len(norm_lines), end_line + CONTEXT_LINES + 1)
+
+        snippet = "\n".join(norm_lines[ctx_start_line:ctx_end_line])
+        ctx_start_abs = sum(len(l) + 1 for l in norm_lines[:ctx_start_line])
+        ctx_end_abs = ctx_start_abs + len(snippet)
+
+        # Highlight EVERY occurrence of ANY query term visible in the
+        # snippet, not just the ones that happened to form the closest
+        # cluster — a person scanning the snippet expects every instance
+        # of their search words marked, not just the "winning" pair.
+        matches = []
+        for term, positions in zip(terms, term_positions):
+            for pos in positions:
+                if ctx_start_abs <= pos < ctx_end_abs:
+                    matches.append({"offset": pos - ctx_start_abs, "len": len(term)})
+        matches.sort(key=lambda m: m["offset"])
+
+        scored_results.append((distance, {
             "video_id": video_id,
             "snippet": snippet,
-            "match_offset": match_offset,
-            "match_len": len(q_norm),
-        })
+            "matches": matches,
+        }))
 
-    return {"query": q, "results": results}
+    scored_results.sort(key=lambda pair: pair[0])
+    return {"query": q, "results": [r for _, r in scored_results]}
 
 
 @app.get("/api/transcript/{video_id}")
