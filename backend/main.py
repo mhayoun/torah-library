@@ -741,6 +741,49 @@ async def search_docs(q: str):
     return {"query": q, "results": [r for _, r in scored_results]}
 
 
+@app.get("/api/document-text/{video_id}")
+async def get_document_text(video_id: str, q: str = ""):
+    """
+    Returns the full extracted (normalized) text of one video's PDF/DOCX
+    handout, with every occurrence of every word in `q` marked — this is
+    what powers the "show the full document" expandable panel in search
+    results (see DocSearchResults.jsx), so a person isn't limited to the
+    3-line snippet from GET /api/search-docs.
+
+    Unlike /api/search-docs, this has no AND requirement and no
+    proximity/context-window logic — it's a single document, already
+    known to match, so every visible occurrence of every query word is
+    just highlighted directly across the WHOLE text.
+
+    Response: { "video_id", "text", "matches": [ {"offset", "len"}, ... ] }.
+    404 if this video has no indexed handout text yet.
+    """
+    try:
+        r = await get_redis()
+        try:
+            raw = await r.get("doc_texts_all")
+            texts: dict = json.loads(raw) if raw else {}
+        finally:
+            await r.aclose()
+    except Exception as e:
+        return {"error": str(e), "type": type(e).__name__}
+
+    stored = texts.get(video_id)
+    if stored is None:
+        raise HTTPException(status_code=404, detail="No document text available for this video")
+
+    text = "\n".join(normalize_hebrew(line) for line in stored.split("\n"))
+
+    terms = list(dict.fromkeys(normalize_hebrew(q).split())) if q else []
+    matches = []
+    for term in terms:
+        for pos in _find_all_positions(text, term):
+            matches.append({"offset": pos, "len": len(term)})
+    matches.sort(key=lambda m: m["offset"])
+
+    return {"video_id": video_id, "text": text, "matches": matches}
+
+
 @app.get("/api/transcript/{video_id}")
 async def get_transcript(video_id: str):
     """
