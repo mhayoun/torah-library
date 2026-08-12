@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Search, BookOpen, Menu, X } from 'lucide-react'
+import { Search, BookOpen, Menu, X, Loader2 } from 'lucide-react'
 
 const NAV_ITEMS = [
   { key: 'כל הקטגוריות', label: 'כל הקטגוריות' },
@@ -13,10 +13,20 @@ const NAV_ITEMS = [
 
 export default function Header({ activeTab, onTabChange }) {
   const [mobileOpen, setMobileOpen] = useState(false)
+  // Brief spinner on the clicked nav item — mirrors HomePage's category
+  // cards (same idea: instant visual feedback that the click registered,
+  // even though switching tabs itself is fast since the data is already
+  // loaded client-side).
+  const [loadingTab, setLoadingTab] = useState(null)
 
   const handleTab = (key) => {
-    onTabChange(key)
-    setMobileOpen(false)
+    if (loadingTab) return
+    setLoadingTab(key)
+    setTimeout(() => {
+      onTabChange(key)
+      setMobileOpen(false)
+      setLoadingTab(null)
+    }, 300)
   }
 
   return (
@@ -38,13 +48,17 @@ export default function Header({ activeTab, onTabChange }) {
           {NAV_ITEMS.map(item => {
             const Icon = item.icon
             const isActive = activeTab === item.key
+            const isLoading = loadingTab === item.key
             return (
               <button
                 key={item.key}
                 style={{ ...styles.navBtn, ...(isActive ? styles.navBtnActive : {}) }}
                 onClick={() => handleTab(item.key)}
+                disabled={!!loadingTab}
               >
-                {Icon && <Icon size={14} style={{ marginLeft: 4 }} />}
+                {isLoading
+                  ? <Loader2 size={14} className="spin" style={{ marginLeft: 4 }} />
+                  : (Icon && <Icon size={14} style={{ marginLeft: 4 }} />)}
                 {item.label}
               </button>
             )
@@ -63,13 +77,17 @@ export default function Header({ activeTab, onTabChange }) {
           {NAV_ITEMS.map(item => {
             const Icon = item.icon
             const isActive = activeTab === item.key
+            const isLoading = loadingTab === item.key
             return (
               <button
                 key={item.key}
                 style={{ ...styles.mobileBtn, ...(isActive ? styles.mobileBtnActive : {}) }}
                 onClick={() => handleTab(item.key)}
+                disabled={!!loadingTab}
               >
-                {Icon && <Icon size={14} style={{ marginLeft: 6 }} />}
+                {isLoading
+                  ? <Loader2 size={14} className="spin" style={{ marginLeft: 6 }} />
+                  : (Icon && <Icon size={14} style={{ marginLeft: 6 }} />)}
                 {item.label}
               </button>
             )

@@ -85,6 +85,14 @@ export default function VideoCard({ video, matchedTopics = [] }) {
 
   const allTopics = Array.isArray(video.topics) ? video.topics : []
 
+  // Only videos the backend actually finished transcribing (see
+  // halacha_transcripts.py) have anything to show here — for every other
+  // video (no captions, processing error, or not הלכה יומית at all,
+  // which never gets transcript_status set) the panel would just fetch
+  // GET /api/transcript/{id}, get a 404, and show "no transcript" — so
+  // skip rendering the toggle entirely instead of offering a dead end.
+  const hasTranscript = video.transcript_status === 'done'
+
   // video.documents — {pdf: {...}|null, docx: {...}|null}, attached by the
   // backend sync when a matching handout was found in the Drive folder for
   // this video (השיעור השבועי only, see drive_documents_utils.py).
@@ -255,54 +263,59 @@ export default function VideoCard({ video, matchedTopics = [] }) {
 
             {/* Transcript panel — lazy-loaded on demand from
                 GET /api/transcript/{id} only when the person clicks
-                this button; not fetched on page load or modal open. */}
-            <div style={styles.transcriptSection}>
-              <button style={styles.transcriptToggle} onClick={toggleTranscript}>
-                <FileText size={14} color="#B8860B" />
-                <span>תמלול השיעור</span>
-                {transcriptOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
-              </button>
+                this button; not fetched on page load or modal open.
+                Only rendered when this video actually has one (see
+                hasTranscript) — no point offering a toggle that always
+                dead-ends in "no transcript available". */}
+            {hasTranscript && (
+              <div style={styles.transcriptSection}>
+                <button style={styles.transcriptToggle} onClick={toggleTranscript}>
+                  <FileText size={14} color="#B8860B" />
+                  <span>תמלול השיעור</span>
+                  {transcriptOpen ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
+                </button>
 
-              {transcriptOpen && (
-                <div style={styles.transcriptBody}>
-                  {transcriptLoading && (
-                    <div style={styles.transcriptStatus}>
-                      <Loader2 size={16} className="spin" />
-                      <span>טוען תמלול…</span>
-                    </div>
-                  )}
-                  {!transcriptLoading && transcriptError && (
-                    <div style={styles.transcriptStatus}>שגיאה בטעינת התמלול: {transcriptError}</div>
-                  )}
-                  {!transcriptLoading && !transcriptError && transcriptChecked && !transcript && (
-                    <div style={styles.transcriptStatus}>אין תמלול זמין לשיעור זה</div>
-                  )}
-                  {!transcriptLoading && transcript?.chunks?.length > 0 && (
-                    <div style={styles.transcriptChunks}>
-                      {transcript.chunks.map((c, i) => (
-                        <div
-                          key={i}
-                          style={{
-                            ...styles.transcriptChunk,
-                            ...(startAt === c.start ? styles.transcriptChunkActive : {}),
-                          }}
-                        >
-                          <button
-                            style={styles.transcriptChunkHeader}
-                            onClick={() => setStartAt(c.start)}
-                            title="לחצו כדי לצפות מנקודה זו בשיעור"
+                {transcriptOpen && (
+                  <div style={styles.transcriptBody}>
+                    {transcriptLoading && (
+                      <div style={styles.transcriptStatus}>
+                        <Loader2 size={16} className="spin" />
+                        <span>טוען תמלול…</span>
+                      </div>
+                    )}
+                    {!transcriptLoading && transcriptError && (
+                      <div style={styles.transcriptStatus}>שגיאה בטעינת התמלול: {transcriptError}</div>
+                    )}
+                    {!transcriptLoading && !transcriptError && transcriptChecked && !transcript && (
+                      <div style={styles.transcriptStatus}>אין תמלול זמין לשיעור זה</div>
+                    )}
+                    {!transcriptLoading && transcript?.chunks?.length > 0 && (
+                      <div style={styles.transcriptChunks}>
+                        {transcript.chunks.map((c, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              ...styles.transcriptChunk,
+                              ...(startAt === c.start ? styles.transcriptChunkActive : {}),
+                            }}
                           >
-                            <span style={styles.topicTime}>{formatTime(c.start)}</span>
-                            <span>{c.keyword || 'פתיחה'}</span>
-                          </button>
-                          <p style={styles.transcriptChunkText}>{c.text}</p>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
+                            <button
+                              style={styles.transcriptChunkHeader}
+                              onClick={() => setStartAt(c.start)}
+                              title="לחצו כדי לצפות מנקודה זו בשיעור"
+                            >
+                              <span style={styles.topicTime}>{formatTime(c.start)}</span>
+                              <span>{c.keyword || 'פתיחה'}</span>
+                            </button>
+                            <p style={styles.transcriptChunkText}>{c.text}</p>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div style={styles.modalMeta}>
               {video.hebraic_year && (
