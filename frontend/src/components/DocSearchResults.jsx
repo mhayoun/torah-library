@@ -1,5 +1,5 @@
-import React from 'react'
-import { FileText, ExternalLink, Loader2 } from 'lucide-react'
+import React, { useState } from 'react'
+import { FileText, ExternalLink, Loader2, ChevronDown, ChevronUp } from 'lucide-react'
 
 // Splits `snippet` into plain-text/<mark> nodes per `matches` (a list of
 // {offset, len} spans, sorted ascending, non-overlapping — see
@@ -39,8 +39,36 @@ function renderHighlightedSnippet(snippet, matches) {
 // deliberately compact (no embedded VideoCard/player here), since this
 // is meant to sit above the regular video results as a fast "jump
 // straight to the paragraph that matched" list.
-function DocSearchHit({ result, video }) {
+//
+// Also offers an expandable "full document" panel — lazy-loaded from
+// GET /api/document-text/{video_id} only when opened — showing the
+// ENTIRE extracted text with every occurrence of every query word
+// highlighted, not just the 3-line snippet (see the docstring on that
+// endpoint in main.py).
+function DocSearchHit({ result, video, query }) {
   const docLink = video.documents?.pdf || video.documents?.docx || null
+
+  const [expanded, setExpanded] = useState(false)
+  const [fullDoc, setFullDoc] = useState(null)
+  const [loadingFull, setLoadingFull] = useState(false)
+  const [errorFull, setErrorFull] = useState(null)
+
+  const toggleExpanded = () => {
+    const willOpen = !expanded
+    setExpanded(willOpen)
+    if (willOpen && !fullDoc && !loadingFull) {
+      setLoadingFull(true)
+      setErrorFull(null)
+      fetch(`/api/document-text/${video.id}?q=${encodeURIComponent(query || '')}`)
+        .then(r => {
+          if (!r.ok) throw new Error(`Erreur serveur : ${r.status}`)
+          return r.json()
+        })
+        .then(data => setFullDoc(data))
+        .catch(e => setErrorFull(e.message))
+        .finally(() => setLoadingFull(false))
+    }
+  }
 
   return (
     <div style={styles.item}>
@@ -59,12 +87,35 @@ function DocSearchHit({ result, video }) {
           <ExternalLink size={13} style={{ marginLeft: 6 }} />
           צפה בשיעור
         </a>
+        <button type="button" onClick={toggleExpanded} style={styles.link}>
+          {expanded ? <ChevronUp size={13} style={{ marginLeft: 6 }} /> : <ChevronDown size={13} style={{ marginLeft: 6 }} />}
+          {expanded ? 'הסתר מסמך מלא' : 'הצג מסמך מלא עם סימון'}
+        </button>
       </div>
+
+      {expanded && (
+        <div style={styles.fullDocBox}>
+          {loadingFull && (
+            <div style={styles.loadingRow}>
+              <Loader2 size={16} color="#B8860B" className="spin" />
+              <span style={styles.count}>טוען מסמך…</span>
+            </div>
+          )}
+          {!loadingFull && errorFull && (
+            <span style={styles.count}>שגיאה בטעינת המסמך: {errorFull}</span>
+          )}
+          {!loadingFull && fullDoc && (
+            <p style={styles.snippet} dir="rtl">
+              {renderHighlightedSnippet(fullDoc.text, fullDoc.matches)}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   )
 }
 
-export default function DocSearchResults({ results, loading, allVideos }) {
+export default function DocSearchResults({ results, loading, allVideos, query }) {
   if (loading) {
     return (
       <div style={styles.loadingRow}>
@@ -89,7 +140,7 @@ export default function DocSearchResults({ results, loading, allVideos }) {
       </div>
       <div style={styles.list}>
         {hits.map(({ result, video }) => (
-          <DocSearchHit key={result.video_id} result={result} video={video} />
+          <DocSearchHit key={result.video_id} result={result} video={video} query={query} />
         ))}
       </div>
     </div>
@@ -166,5 +217,15 @@ const styles = {
     fontFamily: "'Heebo', sans-serif",
     padding: '5px 12px',
     borderRadius: 6,
+    cursor: 'pointer',
+  },
+  fullDocBox: {
+    marginTop: 4,
+    padding: '12px 14px',
+    background: '#FDFBF7',
+    border: '1px solid rgba(184,134,11,.2)',
+    borderRadius: 8,
+    maxHeight: 420,
+    overflowY: 'auto',
   },
 }

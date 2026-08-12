@@ -17,8 +17,7 @@ export default function SearchPage({ allVideos, categories, years, keywords = []
 
   // Full-text search over the extracted PDF/DOCX handout content (see
   // doc_text_utils.py backend side) — shown ABOVE the regular title/topic
-  // matches below, and takes priority: the regular grid only renders as a
-  // fallback when this finds nothing (see the render logic further down).
+  // matches below (both render together; see showRegularGrid).
   const { docResults, docSearchLoading, docSearched, runDocSearch } = useDocSearch()
 
   // If the person arrived here via the HomePage quick-search bar, run the
@@ -85,13 +84,14 @@ export default function SearchPage({ allVideos, categories, years, keywords = []
     [results]
   )
 
-  // Document-content hits take priority over the regular title/topic grid:
-  // when the handout text search actually found something, show ONLY
-  // that (compact snippets + links) — the title-match grid becomes a
-  // fallback, shown only once the doc search has finished and come up
-  // empty (or wasn't applicable, e.g. no text query at all).
+  // Document-content hits are always shown FIRST (see render order below),
+  // followed by the regular title/topic grid across all categories — not
+  // an either/or: a search for a common word may have both a handout
+  // match AND unrelated videos whose title contains it, and both are
+  // useful. The "no results" empty state only fires when NEITHER side
+  // found anything.
   const hasDocHits = docSearched && !docSearchLoading && docResults.length > 0
-  const showRegularGrid = !loading && results.length > 0 && !hasDocHits
+  const showRegularGrid = !loading && results.length > 0
   const showNoResults = !loading && searched && !docSearchLoading && !hasDocHits && results.length === 0
 
   const handleSearch = useCallback(() => {
@@ -197,10 +197,10 @@ export default function SearchPage({ allVideos, categories, years, keywords = []
         </div>
       )}
 
-      {/* Document-content hits (GET /api/search-docs) come FIRST and take
-          priority — the regular title/topic grid below only renders as a
-          fallback when this finds nothing (see showRegularGrid). */}
-      <DocSearchResults results={docResults} loading={docSearchLoading} allVideos={allVideos} />
+      {/* Document-content hits (GET /api/search-docs) always come FIRST,
+          followed by the regular title/topic grid across all categories
+          below — both render together, not either/or. */}
+      <DocSearchResults results={docResults} loading={docSearchLoading} allVideos={allVideos} query={query} />
 
       {showRegularGrid && (
         <>

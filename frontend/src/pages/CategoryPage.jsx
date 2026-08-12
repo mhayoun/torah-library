@@ -128,29 +128,30 @@ export default function CategoryPage({ category, playlists: videos, years = [], 
         </div>
       </div>
 
-      {/* Document-content hits (GET /api/search-docs) come FIRST and take
-          priority — the regular video grid below only renders as a
-          fallback when this finds nothing. Only ever attempted on
-          השיעור השבועי, the sole category with matched handouts. */}
+      {/* Document-content hits (GET /api/search-docs) always come FIRST,
+          followed by the regular video grid below — both render together,
+          not either/or. Only ever attempted on השיעור השבועי, the sole
+          category with matched handouts. */}
       {isWeeklyLesson && (
-        <DocSearchResults results={docResults} loading={docSearchLoading} allVideos={videos} />
+        <DocSearchResults results={docResults} loading={docSearchLoading} allVideos={videos} query={query} />
       )}
 
-      {!hasDocHits && (
-        filtered.length === 0
-          ? <p style={styles.empty}>
+      {filtered.length === 0
+        ? (!hasDocHits && (
+            <p style={styles.empty}>
               {query.trim() || year !== ALL_YEARS
                 ? 'לא נמצאו תוצאות. נסו מילות חיפוש אחרות.'
                 : 'אין שיעורים בקטגוריה זו'}
             </p>
-          : (
-            <div style={styles.grid}>
-              {filtered.map(({ video: v, topicMatches }) => (
-                <VideoCard key={v.id} video={{ ...v, category }} matchedTopics={topicMatches} />
-              ))}
-            </div>
-          )
-      )}
+          ))
+        : (
+          <div style={styles.grid}>
+            {filtered.map(({ video: v, topicMatches }) => (
+              <VideoCard key={v.id} video={{ ...v, category }} matchedTopics={topicMatches} />
+            ))}
+          </div>
+        )
+      }
     </div>
   )
 }
