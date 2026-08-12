@@ -5,6 +5,11 @@ import { useCallback, useRef, useState } from 'react'
 // so without this every character typed would fire its own request.
 const DEBOUNCE_MS = 300
 
+// Below this length a query is almost always a false start (still
+// typing the first word) — searching that early would burn a request
+// per keystroke for no useful result, so we just wait for more input.
+const MIN_QUERY_LENGTH = 3
+
 // Full-text search over the extracted PDF/DOCX handout content (see
 // backend/doc_text_utils.py + GET /api/search-docs). Shared between
 // SearchPage and CategoryPage so both pages behave identically instead
@@ -20,7 +25,8 @@ export function useDocSearch() {
     clearTimeout(timerRef.current)
     const q = (rawQuery || '').trim()
 
-    if (!q) {
+    if (q.length < MIN_QUERY_LENGTH) {
+      ++requestIdRef.current // invalidate any in-flight request from a longer query typed then deleted
       setDocResults([])
       setDocSearchLoading(false)
       setDocSearched(false)

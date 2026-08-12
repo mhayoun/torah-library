@@ -1,5 +1,5 @@
 import React from 'react'
-import { FileText, ExternalLink } from 'lucide-react'
+import { FileText, ExternalLink, Loader2 } from 'lucide-react'
 
 // Splits `snippet` into plain-text/<mark> nodes per `matches` (a list of
 // {offset, len} spans, sorted ascending, non-overlapping — see
@@ -67,7 +67,8 @@ function DocSearchHit({ result, video }) {
 export default function DocSearchResults({ results, loading, allVideos }) {
   if (loading) {
     return (
-      <div style={styles.section}>
+      <div style={styles.loadingRow}>
+        <Loader2 size={16} color="#B8860B" className="spin" />
         <span style={styles.count}>מחפש בתוך המסמכים…</span>
       </div>
     )
@@ -97,6 +98,13 @@ export default function DocSearchResults({ results, loading, allVideos }) {
 
 const styles = {
   section: { marginBottom: 32 },
+  loadingRow: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 32,
+    padding: '0 4px',
+  },
   header: {
     display: 'flex',
     alignItems: 'center',
