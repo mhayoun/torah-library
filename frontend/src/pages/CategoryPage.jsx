@@ -1,8 +1,9 @@
 import React, { useState, useMemo, useEffect } from 'react'
-import { Search } from 'lucide-react'
+import { Search, Loader2 } from 'lucide-react'
 import VideoCard from '../components/VideoCard.jsx'
 import DocSearchResults from '../components/DocSearchResults.jsx'
 import { useDocSearch } from '../hooks/useDocSearch.js'
+import { useInfiniteReveal } from '../hooks/useInfiniteReveal.js'
 
 const ALL_YEARS = 'כל השנים'
 const TOPIC_CATEGORY = 'הלכה יומית'
@@ -67,6 +68,12 @@ export default function CategoryPage({ category, playlists: videos, years = [], 
     () => filtered.filter(r => r.topicMatches.length > 0).length,
     [filtered]
   )
+
+  // Mounting all of a big category's VideoCards at once (e.g. הלכה יומית's
+  // 1300+ videos) is what actually causes the visible lag when switching
+  // category — the data itself is already loaded. Reveal them in batches
+  // instead, growing automatically as the person scrolls near the bottom.
+  const { visibleItems, sentinelRef, hasMore } = useInfiniteReveal(filtered)
 
   return (
     <div style={styles.page}>
@@ -145,11 +152,18 @@ export default function CategoryPage({ category, playlists: videos, years = [], 
             </p>
           ))
         : (
-          <div style={styles.grid}>
-            {filtered.map(({ video: v, topicMatches }) => (
-              <VideoCard key={v.id} video={{ ...v, category }} matchedTopics={topicMatches} />
-            ))}
-          </div>
+          <>
+            <div style={styles.grid}>
+              {visibleItems.map(({ video: v, topicMatches }) => (
+                <VideoCard key={v.id} video={{ ...v, category }} matchedTopics={topicMatches} />
+              ))}
+            </div>
+            {hasMore && (
+              <div ref={sentinelRef} style={styles.loadMoreRow}>
+                <Loader2 size={18} color="#B8860B" className="spin" />
+              </div>
+            )}
+          </>
         )
       }
     </div>
@@ -264,6 +278,11 @@ const styles = {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
     gap: 16,
+  },
+  loadMoreRow: {
+    display: 'flex',
+    justifyContent: 'center',
+    padding: '28px 0',
   },
   empty: {
     padding: '40px 0',

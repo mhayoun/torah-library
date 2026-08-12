@@ -1,8 +1,9 @@
 import React, { useState, useMemo, useCallback, useEffect } from 'react'
-import { Search, Filter, SlidersHorizontal } from 'lucide-react'
+import { Search, Filter, SlidersHorizontal, Loader2 } from 'lucide-react'
 import VideoCard from '../components/VideoCard.jsx'
 import DocSearchResults from '../components/DocSearchResults.jsx'
 import { useDocSearch } from '../hooks/useDocSearch.js'
+import { useInfiniteReveal } from '../hooks/useInfiniteReveal.js'
 import { dlog } from '../utils/debug.js'
 
 const ALL_LABEL = 'כל הקטגוריות'
@@ -93,6 +94,11 @@ export default function SearchPage({ allVideos, categories, years, keywords = []
   const hasDocHits = docSearched && !docSearchLoading && docResults.length > 0
   const showRegularGrid = !loading && results.length > 0
   const showNoResults = !loading && searched && !docSearchLoading && !hasDocHits && results.length === 0
+
+  // A broad search across all categories can match hundreds of videos —
+  // mounting every VideoCard at once is what causes visible lag, not the
+  // (already client-side) filtering itself. Reveal in batches instead.
+  const { visibleItems: visibleResults, sentinelRef, hasMore } = useInfiniteReveal(results)
 
   const handleSearch = useCallback(() => {
     dlog('SearchPage', 'manual search button clicked', { query, category, year })
@@ -215,10 +221,15 @@ export default function SearchPage({ allVideos, categories, years, keywords = []
             </span>
           </div>
           <div style={styles.grid}>
-            {results.map(({ video, topicMatches }) => (
+            {visibleResults.map(({ video, topicMatches }) => (
               <VideoCard key={video.id} video={video} matchedTopics={topicMatches} />
             ))}
           </div>
+          {hasMore && (
+            <div ref={sentinelRef} style={styles.loadMoreRow}>
+              <Loader2 size={18} color="#B8860B" className="spin" />
+            </div>
+          )}
         </>
       )}
     </div>
@@ -345,6 +356,11 @@ const styles = {
     display: 'grid',
     gridTemplateColumns: 'repeat(auto-fill, minmax(280px, 1fr))',
     gap: 20,
+  },
+  loadMoreRow: {
+    display: 'flex',
+    justifyContent: 'center',
+    padding: '28px 0',
   },
   spinnerWrap: {
     display: 'flex',
