@@ -96,7 +96,7 @@ export default function CategoryPage({ category, playlists: videos, years = [], 
             <div style={styles.searchInputWrap}>
               <input
                 type="text"
-                placeholder={hasTopics
+                placeholder={hasTopics || isWeeklyLesson
                   ? 'חיפוש לפי כותרת או לפי נושא בתוך השיעור…'
                   : 'חיפוש לפי כותרת…'}
                 value={query}
