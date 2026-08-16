@@ -1,5 +1,5 @@
 import React, { useState } from 'react'
-import { Search, BookOpen, Menu, X, Loader2 } from 'lucide-react'
+import { Search, BookOpen, Menu, X, Loader2, Mail } from 'lucide-react'
 
 const NAV_ITEMS = [
   { key: 'כל הקטגוריות', label: 'כל הקטגוריות' },
@@ -9,6 +9,7 @@ const NAV_ITEMS = [
   { key: 'השיעור השבועי', label: 'השיעור השבועי' },
   { key: 'שיחת חולין', label: 'שיחת חולין' },
   { key: '__search__',   label: 'חיפוש', icon: Search },
+  { key: '__contact__',  label: 'צור קשר', icon: Mail },
 ]
 
 export default function Header({ activeTab, onTabChange }) {

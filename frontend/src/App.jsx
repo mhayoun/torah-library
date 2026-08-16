@@ -3,6 +3,7 @@ import Header from './components/Header.jsx'
 import HomePage from './pages/HomePage.jsx'
 import CategoryPage from './pages/CategoryPage.jsx'
 import SearchPage from './pages/SearchPage.jsx'
+import ContactPage from './pages/ContactPage.jsx'
 import {useVideos} from './hooks/useVideos.js'
 import {useKeywords} from './hooks/useKeywords.js'
 import {dlog} from './utils/debug.js'
@@ -55,6 +56,9 @@ export default function App() {
                 />
             )
 
+        if (activeTab === '__contact__')
+            return <ContactPage/>
+
         if (activeTab === 'כל הקטגוריות')
             return (
                 <HomePage
@@ -91,6 +95,8 @@ export default function App() {
                     <span>הרב אהרון בוטבול שליט"א</span>
                     <span style={s.dot}>•</span>
                     <span>כל הזכויות שמורות</span>
+                    <span style={s.dot}>•</span>
+                    <button style={s.footerLink} onClick={() => setActiveTab('__contact__')}>צור קשר</button>
                     <span style={s.dot}>•</span> {/* Optionnel : ajoute un point de séparation visuel */}
                     <div className="copyright" style={{display: 'inline-block'}}>
                         © <a href="https://yelotag.vercel.app/" target="_blank" rel="noopener noreferrer">yelotag.com</a>
@@ -125,4 +131,10 @@ const s = {
         fontSize: '.78rem', fontFamily: "'Heebo', sans-serif",
     },
     dot: {opacity: .3},
+    footerLink: {
+        background: 'none', border: 'none', padding: 0,
+        color: 'rgba(245,240,232,.4)', fontSize: '.78rem',
+        fontFamily: "'Heebo', sans-serif", cursor: 'pointer',
+        textDecoration: 'underline',
+    },
 }
