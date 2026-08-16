@@ -28,7 +28,7 @@ npm run dev
 
 # tail crontab
 tail -f /home/moshe/backfill_cron.log
-  cat /home/moshe/backfill_cron.log
+cat /home/moshe/backfill_cron.log
 grep CRON /var/log/syslog | tail -20
 journalctl -u cron --since "10 minutes ago"
 
