@@ -29,6 +29,10 @@ Endpoints:
                      of /api/cours — it's only fetched on demand, when
                      someone actually opens the transcript panel for a
                      video, so the main catalogue payload stays small.
+  POST /api/visits   — records a page view (and, given `visitor_id`, a
+                     unique visitor) and returns the running totals.
+                     Called once per page load from the frontend.
+  GET /api/visits    — read-only: current page-view/visitor totals.
   GET/POST /api/sync — called by the Vercel cron job once a day
                      (or by a YouTube PubSubHubbub webhook); runs the
                      actual incremental sync against YouTube and
@@ -70,6 +74,11 @@ Redis keys:
                      read back via GET /api/transcript/{video_id}, i.e.
                      when a visitor actually opens that video's
                      transcript panel.
+  visits_total     — INCR counter, total page views across all time.
+                     No TTL. Bumped by every POST /api/visits.
+  visits_unique    — SET of frontend-generated visitor ids (persisted
+                     client-side in localStorage). SCARD = unique
+                     visitor count. No TTL.
 
 Environment variables (set in Vercel or .env):
   YOUTUBE_API_KEY
@@ -575,6 +584,47 @@ async def get_keywords():
             all_videos = json.loads(full_raw) if full_raw else []
             keywords = await _save_keywords_list(r, all_videos)
             return {"keywords": keywords}
+        finally:
+            await r.aclose()
+    except Exception as e:
+        return {"error": str(e), "type": type(e).__name__}
+
+
+@app.post("/api/visits")
+async def record_visit(visitor_id: str | None = None):
+    """
+    Called once per page load from the frontend to record a visit.
+    `visitor_id` is a random id the frontend generates and persists in
+    localStorage, so repeat visits from the same browser count once
+    toward "unique" but still bump the total page-view counter.
+
+    Redis keys:
+      visits_total  — INCR counter, total page views, no TTL.
+      visits_unique — SET of visitor ids, SCARD = unique visitors, no TTL.
+    """
+    try:
+        r = await get_redis()
+        try:
+            total = await r.incr("visits_total")
+            if visitor_id:
+                await r.sadd("visits_unique", visitor_id)
+            unique = await r.scard("visits_unique")
+            return {"total_views": total, "unique_visitors": unique}
+        finally:
+            await r.aclose()
+    except Exception as e:
+        return {"error": str(e), "type": type(e).__name__}
+
+
+@app.get("/api/visits")
+async def get_visits():
+    """Read-only counts (no increment) — total page views + unique visitors."""
+    try:
+        r = await get_redis()
+        try:
+            total = await r.get("visits_total")
+            unique = await r.scard("visits_unique")
+            return {"total_views": int(total or 0), "unique_visitors": unique}
         finally:
             await r.aclose()
     except Exception as e:

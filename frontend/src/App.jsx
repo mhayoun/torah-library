@@ -6,6 +6,7 @@ import SearchPage from './pages/SearchPage.jsx'
 import ContactPage from './pages/ContactPage.jsx'
 import {useVideos} from './hooks/useVideos.js'
 import {useKeywords} from './hooks/useKeywords.js'
+import {useVisits} from './hooks/useVisits.js'
 import {dlog} from './utils/debug.js'
 
 export default function App() {
@@ -16,6 +17,7 @@ export default function App() {
     } = useVideos()
 
     const {keywords} = useKeywords()
+    const {totalViews, uniqueVisitors} = useVisits()
 
     const [activeTab, setActiveTab] = useState('כל הקטגוריות')
     const [searchInit, setSearchInit] = useState(null)
@@ -74,6 +76,8 @@ export default function App() {
                     newCount={newCount}
                     fetchMs={fetchMs}
                     fetchSource={fetchSource}
+                    totalViews={totalViews}
+                    uniqueVisitors={uniqueVisitors}
                 />
             )
 
@@ -101,6 +105,14 @@ export default function App() {
                     <div className="copyright" style={{display: 'inline-block'}}>
                         © <a href="https://yelotag.vercel.app/" target="_blank" rel="noopener noreferrer">yelotag.com</a>
                     </div>
+                    {(uniqueVisitors != null || totalViews != null) && (
+                        <>
+                            <span style={s.dot}>•</span>
+                            <span style={s.footerStats} dir="ltr">
+                                visitors:{uniqueVisitors ?? 0} page views:{totalViews ?? 0}
+                            </span>
+                        </>
+                    )}
                 </div>
             </footer>
         </div>
@@ -131,6 +143,7 @@ const s = {
         fontSize: '.78rem', fontFamily: "'Heebo', sans-serif",
     },
     dot: {opacity: .3},
+    footerStats: {color: 'rgba(245,240,232,.4)', fontSize: '.78rem', fontFamily: "'Heebo', sans-serif"},
     footerLink: {
         background: 'none', border: 'none', padding: 0,
         color: 'rgba(245,240,232,.4)', fontSize: '.78rem',
