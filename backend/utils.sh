@@ -35,3 +35,6 @@ journalctl -u cron --since "10 minutes ago"
 
 python3 util_purge_private_videos.py          # dry run first
 python3 util_purge_private_videos.py --apply  # actually removes it
+
+# log
+https://rav-aaron-butbul.vercel.app/api/log

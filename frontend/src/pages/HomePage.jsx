@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react'
-import { BookOpen, ChevronLeft, Loader2, RefreshCw, Sparkles, Search, Filter, Users, Eye } from 'lucide-react'
+import { BookOpen, ChevronLeft, Loader2, RefreshCw, Sparkles, Search, Filter } from 'lucide-react'
 import VideoCard from '../components/VideoCard.jsx'
 import { dlog } from '../utils/debug.js'
 
@@ -38,7 +38,7 @@ function formatDuration(ms, source) {
 export default function HomePage({
   catalog, allVideos = [], categories = [], years = [], keywords = [],
   onCategorySelect, onSearch, lastSync, total, newCount,
-  fetchMs, fetchSource, totalViews, uniqueVisitors,
+  fetchMs, fetchSource,
 }) {
   const entries       = Object.entries(catalog)
   const syncLabel      = formatSync(lastSync)
@@ -212,24 +212,6 @@ export default function HomePage({
               עודכן לאחרונה: {syncLabel}
               {durationLabel && (
                 <span style={s.syncDuration}> · זמן טעינה: {durationLabel}</span>
-              )}
-            </div>
-          )}
-
-          {(totalViews != null || uniqueVisitors != null) && (
-            <div style={s.syncBadge}>
-              {uniqueVisitors != null && (
-                <>
-                  <Users size={11} style={{ marginLeft: 5, flexShrink: 0 }} />
-                  {uniqueVisitors.toLocaleString('he-IL')} מבקרים
-                </>
-              )}
-              {totalViews != null && (
-                <span style={uniqueVisitors != null ? s.syncDuration : undefined}>
-                  {uniqueVisitors != null && ' · '}
-                  <Eye size={11} style={{ marginLeft: 5, verticalAlign: 'text-bottom', flexShrink: 0 }} />
-                  {totalViews.toLocaleString('he-IL')} צפיות
-                </span>
               )}
             </div>
           )}

@@ -76,8 +76,6 @@ export default function App() {
                     newCount={newCount}
                     fetchMs={fetchMs}
                     fetchSource={fetchSource}
-                    totalViews={totalViews}
-                    uniqueVisitors={uniqueVisitors}
                 />
             )
 
