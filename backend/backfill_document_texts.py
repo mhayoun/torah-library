@@ -53,6 +53,51 @@ async def _connect_with_retry(attempts: int = 3, delay: float = 2.0):
     sys.exit(1)
 
 
+WEEKLY_LESSON_CATEGORY = "השיעור השבועי"
+
+
+def _doc_status(v: dict) -> str:
+    docs = v.get("documents")
+    if not docs:
+        return "no match"
+    names = [docs[k]["name"] for k in ("pdf", "docx") if docs.get(k)]
+    return ", ".join(names) if names else "no match"
+
+
+def _debug_last_videos(all_videos: list, n: int = 10):
+    """
+    Prints the N most-recently-uploaded השיעור השבועי videos with their
+    current Drive-match status, so a stalled/broken match (e.g. Drive
+    token expired, folder naming drifted) is visible at a glance instead
+    of only showing up as a growing 'pending' count.
+    """
+    weekly = [v for v in all_videos if v.get("category") == WEEKLY_LESSON_CATEGORY]
+    weekly.sort(key=lambda v: v.get("upload_date") or "", reverse=True)
+    print(f"\n=== Last {min(n, len(weekly))} {WEEKLY_LESSON_CATEGORY} video(s) (most recent upload first) ===")
+    for v in weekly[:n]:
+        print(f"  [{v.get('upload_date')}] {v.get('title')}  ({v.get('id')})  -> {_doc_status(v)}")
+    print("=" * 60)
+
+
+def _debug_last_doc_texts(all_videos: list, existing: dict, n: int = 10):
+    """
+    Prints the last N entries already indexed in doc_texts_all (insertion
+    order == extraction order, since Redis/JSON dicts preserve it), with
+    a short preview of the extracted text - a quick sanity check that
+    extraction is producing real, readable Hebrew and not garbage/empty
+    strings.
+    """
+    by_id = {v["id"]: v for v in all_videos if v.get("id")}
+    last_ids = list(existing.keys())[-n:]
+    print(f"\n=== Last {len(last_ids)} indexed doc_texts_all entr(ies) ===")
+    for vid in last_ids:
+        text = existing.get(vid, "")
+        title = by_id.get(vid, {}).get("title", "(video not found in cours_full)")
+        preview = " ".join(text.split())[:80]
+        print(f"  {vid}  ({len(text)} chars)  {title}\n      preview: {preview}...")
+    print("=" * 60)
+
+
 async def run(limit: int | None, dry_run: bool):
     r = await _connect_with_retry()
     try:
@@ -64,12 +109,15 @@ async def run(limit: int | None, dry_run: bool):
         existing = json.loads(existing_raw) if existing_raw else {}
         print(f"doc_texts_all: {len(existing)} handout(s) already indexed")
 
+        _debug_last_videos(all_videos)
+        _debug_last_doc_texts(all_videos, existing)
+
         pending = [
             v for v in all_videos
             if v.get("documents") and v.get("id") not in existing
             and (v["documents"].get("pdf") or v["documents"].get("docx"))
         ]
-        print(f"{len(pending)} handout(s) still need text extraction\n")
+        print(f"\n{len(pending)} handout(s) still need text extraction\n")
 
         if not pending:
             print("Nothing to do.")
@@ -77,11 +125,14 @@ async def run(limit: int | None, dry_run: bool):
 
         if dry_run:
             for v in pending[: limit or len(pending)]:
-                print(f"  would process: {v.get('title')}  ({v.get('id')})")
+                print(f"  would process: {v.get('title')}  ({v.get('id')})  [{_doc_status(v)}]")
             print("\nDry run — nothing written to Redis.")
             return
 
         print(f"Processing (limit={limit or 'unlimited'})...\n")
+        for v in pending[: limit or len(pending)]:
+            print(f"  queued: {v.get('title')}  ({v.get('id')})  [{_doc_status(v)}]")
+
         doc_texts, extracted = build_doc_texts_index(all_videos, existing, max_new=limit)
         await r.set("doc_texts_all", json.dumps(doc_texts, ensure_ascii=False))
 
@@ -89,6 +140,8 @@ async def run(limit: int | None, dry_run: bool):
         remaining = len(pending) - extracted
         if remaining > 0:
             print(f"{remaining} handout(s) still remain — run again to continue the backfill.")
+
+        _debug_last_doc_texts(all_videos, doc_texts)
 
     finally:
         await r.aclose()
