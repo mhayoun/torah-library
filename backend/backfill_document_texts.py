@@ -64,22 +64,25 @@ def _doc_status(v: dict) -> str:
     return ", ".join(names) if names else "no match"
 
 
-def _debug_last_videos(all_videos: list, n: int = 10):
+def _debug_last_videos(all_videos: list, n: int = 3):
     """
-    Prints the N most-recently-uploaded השיעור השבועי videos with their
-    current Drive-match status, so a stalled/broken match (e.g. Drive
-    token expired, folder naming drifted) is visible at a glance instead
-    of only showing up as a growing 'pending' count.
+    Prints the N most-recently-uploaded השיעור השבועי videos that still have
+    NO matched PDF/DOCX, so a stalled/broken match (e.g. Drive token expired,
+    folder naming drifted) is visible at a glance instead of only showing up
+    as a growing 'pending' count.
     """
-    weekly = [v for v in all_videos if v.get("category") == WEEKLY_LESSON_CATEGORY]
+    weekly = [
+        v for v in all_videos
+        if v.get("category") == WEEKLY_LESSON_CATEGORY and _doc_status(v) == "no match"
+    ]
     weekly.sort(key=lambda v: v.get("upload_date") or "", reverse=True)
-    print(f"\n=== Last {min(n, len(weekly))} {WEEKLY_LESSON_CATEGORY} video(s) (most recent upload first) ===")
+    print(f"\n=== Last {min(n, len(weekly))} {WEEKLY_LESSON_CATEGORY} video(s) with no pdf/doc match (most recent upload first) ===")
     for v in weekly[:n]:
         print(f"  [{v.get('upload_date')}] {v.get('title')}  ({v.get('id')})  -> {_doc_status(v)}")
     print("=" * 60)
 
 
-def _debug_last_doc_texts(all_videos: list, existing: dict, n: int = 10):
+def _debug_last_doc_texts(all_videos: list, existing: dict, n: int = 3):
     """
     Prints the last N entries already indexed in doc_texts_all (insertion
     order == extraction order, since Redis/JSON dicts preserve it), with

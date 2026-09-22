@@ -28,13 +28,34 @@ load_dotenv()
 
 from redis.exceptions import RedisError
 
-from main import get_redis, _response_from_full, _save_transcript
+from main import get_redis, _response_from_full, _save_transcript, TARGET_URLS, FULL_SCAN_ONLY_URLS
 from halacha_transcripts import HALACHA_CATEGORY, needs_transcript, process_video_transcript
+from playlist_utils import get_raw_playlists, categorize_playlists
 from ai_keywords_utils import (
     _get_model_candidates, _get_groq_model_candidates,
     QuotaExhaustedError, GeminiTransientError,
 )
 from transcript_utils import TranscriptFetchBlocked
+
+
+def _fetch_playlist_urls_by_title() -> dict:
+    """
+    Best-effort {playlist_title: playlist_url} map for the הלכה יומית
+    category, via the same yt-dlp discovery main.py's sync uses — purely
+    for the debug printout below, so a failure here (network hiccup,
+    yt-dlp change) must never abort the actual backfill.
+    """
+    try:
+        raw = get_raw_playlists(TARGET_URLS + FULL_SCAN_ONLY_URLS)
+        structured = categorize_playlists(raw)
+        return {
+            pl.get("title"): pl.get("url")
+            for pl in structured.get(HALACHA_CATEGORY, [])
+        }
+    except Exception as e:
+        print(f"⚠️  Couldn't fetch playlist URLs for the debug printout below "
+              f"({type(e).__name__}: {e}) — continuing without them.\n")
+        return {}
 
 
 async def _connect_with_retry(attempts: int = 3, delay: float = 2.0):
@@ -102,11 +123,35 @@ async def run(limit: int, dry_run: bool, sleep_min: float, sleep_max: float, pro
         all_videos = json.loads(raw) if raw else []
         print(f"cours_full: {len(all_videos)} video(s) total")
 
-        candidates = [
-            v for v in all_videos
-            if v.get("category") == HALACHA_CATEGORY and needs_transcript(v)
-        ]
-        print(f"{HALACHA_CATEGORY}: {len(candidates)} video(s) still need a transcript\n")
+        halacha_videos = [v for v in all_videos if v.get("category") == HALACHA_CATEGORY]
+        candidates = [v for v in halacha_videos if needs_transcript(v)]
+        print(f"{HALACHA_CATEGORY}: {len(halacha_videos)} video(s) total, "
+              f"{len(candidates)} still need a transcript\n")
+
+        by_playlist: dict[str, list] = {}
+        for v in halacha_videos:
+            by_playlist.setdefault(v.get("playlist") or "Unknown playlist", []).append(v)
+
+        needing_by_playlist: dict[str, int] = {}
+        for v in candidates:
+            pl = v.get("playlist") or "Unknown playlist"
+            needing_by_playlist[pl] = needing_by_playlist.get(pl, 0) + 1
+
+        playlist_urls = _fetch_playlist_urls_by_title()
+
+        print(f"--- By playlist ({len(by_playlist)}) ---")
+        for pl, vids in sorted(by_playlist.items(), key=lambda kv: len(kv[1]), reverse=True):
+            url = playlist_urls.get(pl)
+            print(f"  {pl}{f' ({url})' if url else ''}: {len(vids)} video(s) total, "
+                  f"{needing_by_playlist.get(pl, 0)} still need a transcript")
+            recent = sorted(
+                vids,
+                key=lambda v: v.get("upload_date") or "1970-01-01T00:00:00+00:00",
+                reverse=True,
+            )[:5]
+            for v in recent:
+                print(f"      - [{v.get('upload_date', '?')}] {v.get('title')}")
+        print("---------------------------\n")
 
         batch = candidates[:limit]
         if not batch:
