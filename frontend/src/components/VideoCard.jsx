@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
 import { Play, Clock, Eye, Calendar, X, ExternalLink, BookOpen, Tag, FileText, Loader2, ChevronDown, ChevronUp } from 'lucide-react'
+import VideoPlayer from './VideoPlayer'
 
 function formatDate(iso) {
   if (!iso) return null
@@ -178,21 +179,19 @@ export default function VideoCard({ video, matchedTopics = [] }) {
             <h2 style={styles.modalTitle}>{video.title}</h2>
             <div style={styles.categoryTag}>{video.category}</div>
 
-            {/* YouTube embed — starts at `startAt` seconds and autoplays
-                when opened via a topic jump; starts from the beginning
-                (paused, per YouTube's default) when opened normally. */}
+            {/* Custom player — YouTube's own controls are disabled
+                (controls=0 + an interaction-blocking overlay); playback is
+                only reachable through VideoPlayer's own header (play/seek)
+                and footer (volume/fullscreen) bars. Keyed on `startAt` so
+                jumping to a different topic while the modal is open
+                restarts the underlying player at the new position. */}
             {video.id && (
-              <div style={styles.embedWrap}>
-                <iframe
+              <div style={styles.playerWrap}>
+                <VideoPlayer
                   key={startAt ?? 'start'}
-                  src={
-                    `https://www.youtube.com/embed/${video.id}?rel=0&hl=iw` +
-                    (startAt ? `&start=${Math.floor(startAt)}&autoplay=1` : '')
-                  }
+                  videoId={video.id}
                   title={video.title}
-                  style={styles.embed}
-                  allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-                  allowFullScreen
+                  startSeconds={startAt}
                 />
               </div>
             )}
@@ -731,21 +730,8 @@ const styles = {
     borderRadius: 20,
     marginBottom: 16,
   },
-  embedWrap: {
-    position: 'relative',
-    paddingBottom: '56.25%',
-    height: 0,
-    borderRadius: 10,
-    overflow: 'hidden',
+  playerWrap: {
     marginBottom: 20,
-    background: '#000',
-  },
-  embed: {
-    position: 'absolute',
-    inset: 0,
-    width: '100%',
-    height: '100%',
-    border: 'none',
   },
   modalMeta: {
     display: 'flex',
