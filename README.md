@@ -36,6 +36,35 @@ torah-library/
 
 ---
 
+## Run locally (one terminal)
+
+The frontend dev server proxies `/api/*` to `http://localhost:8000` (see `frontend/vite.config.js`). If the backend isn't running, every API call fails with **"Erreur serveur : 500"**. So start the backend first.
+
+**Prerequisite:** `backend/.env` must exist with at least `YOUTUBE_API_KEY` and `REDIS_URL`. `main.py` loads it automatically. Optional keys: `GEMINI_API_KEY`, `GROQ_API_KEY`, `GOOGLE_DRIVE_TOKEN_JSON`.
+
+**First time only:** install the dependencies. Run this from the repo root, with Node 22 active (`nvm use 22`):
+
+```bash
+cd ~/mydev/ravbutbul/torah-library
+cd backend && python3 -m venv venv && source venv/bin/activate && pip install -r requirements.txt && cd ..
+cd frontend && npm install && cd ..
+```
+
+**Every time:** run the script. It works from any directory:
+
+```bash
+~/mydev/ravbutbul/torah-library/dev.sh
+```
+
+`dev.sh` does three things:
+- It switches to Node 22 via nvm (`frontend/.nvmrc`). The system Node 16 is too old for Vite 5 and fails with `crypto$2.getRandomValues is not a function`.
+- It starts the backend in the background, with logs in `backend.log`, and waits until the backend answers.
+- It then starts Vite.
+
+Open http://localhost:5173. Press **Ctrl+C** to stop both the backend and the frontend.
+
+---
+
 ## Backend Setup
 
 ### How it works
