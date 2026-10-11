@@ -29,6 +29,18 @@ Endpoints:
                      of /api/cours — it's only fetched on demand, when
                      someone actually opens the transcript panel for a
                      video, so the main catalogue payload stays small.
+  GET /api/captions/{video_id}?lang=en|fr|ru — timed captions for one
+                     video translated from its Hebrew transcript with
+                     Gemini: { "video_id", "lang", "segments":
+                     [{"start","duration","text"}, ...] }. Generated on
+                     the first request for that video+language (can take
+                     ~20s-2min) and cached forever after. While a
+                     translation is in progress, concurrent requests get
+                     202 {"status": "pending"} and should retry. Exists
+                     because YouTube's own auto-translated captions are
+                     refused (429) inside embedded players. Lessons
+                     over ~20 min get 413 (Gemini free-tier limits — see
+                     caption_translation.MAX_SEGMENTS).
   POST /api/visits   — records a page view (and, given `visitor_id`, a
                      unique visitor) and returns the running totals.
                      Called once per page load from the frontend.
@@ -74,6 +86,16 @@ Redis keys:
                      read back via GET /api/transcript/{video_id}, i.e.
                      when a visitor actually opens that video's
                      transcript panel.
+  transcript_segments:<id> — raw timed Hebrew transcript segments
+                     [{"text","start","duration"}, ...] for one video,
+                     cached the first time a translation is requested
+                     (the topic-chunked transcript:<id> has lost the
+                     per-line timings captions need). No TTL.
+  captions:<id>:<lang> — translated caption segments (lang = en/fr/ru),
+                     the GET /api/captions response body. No TTL.
+  captions_lock:<id>:<lang> — set (NX, 5 min TTL) while a translation is
+                     running, so concurrent visitors don't each pay for
+                     the same Gemini call.
   visits_total     — INCR counter, total page views across all time.
                      No TTL. Bumped by every POST /api/visits.
   visits_unique    — SET of frontend-generated visitor ids (persisted
@@ -85,6 +107,7 @@ Environment variables (set in Vercel or .env):
   REDIS_URL        e.g. redis://default:xxx@xxx.upstash.io:6379
 """
 
+import asyncio
 import json
 import os
 from datetime import datetime, timezone
@@ -94,6 +117,7 @@ load_dotenv()   # must run BEFORE importing playlist_videos_utils, which reads
                 # YOUTUBE_API_KEY from os.environ at import time.
 
 from fastapi import FastAPI, HTTPException, Header
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from redis.asyncio import Redis as aioredis
 import ssl
@@ -874,6 +898,92 @@ async def get_transcript(video_id: str):
         raise
     except Exception as e:
         return {"error": str(e), "type": type(e).__name__}
+
+
+CAPTIONS_LOCK_TTL = 300  # seconds — matches the function's maxDuration
+
+
+@app.get("/api/captions/{video_id}")
+async def get_captions(video_id: str, lang: str):
+    """
+    Returns timed captions for one video, translated from its Hebrew
+    transcript into `lang` (en / fr / ru) — see caption_translation.py.
+
+    Cached in `captions:<video_id>:<lang>` once generated. On a cache miss
+    the Hebrew segments are fetched from YouTube (or reused from
+    `transcript_segments:<video_id>`) and translated with Gemini, which
+    can take from ~20s (short lesson) to a couple of minutes (hour-long
+    lesson). Only videos present in cours_full are translated, so the
+    endpoint can't be used to spend Gemini quota on arbitrary videos.
+
+    Response shape:
+      { "video_id": str, "lang": str,
+        "segments": [{"start": float, "duration": float, "text": str}, ...] }
+
+    202 {"status": "pending"} — another request is already translating
+        this video+language; retry in a few seconds.
+    400 — unsupported lang.
+    413 — lesson longer than caption_translation.MAX_SEGMENTS (~20 min).
+    404 — unknown video, or it has no Hebrew captions to translate.
+    503 — YouTube blocked the transcript fetch, or Gemini is unavailable
+        (quota exhausted / down); worth retrying later.
+    """
+    from caption_translation import SUPPORTED_LANGUAGES, MAX_SEGMENTS, translate_segments
+
+    if lang not in SUPPORTED_LANGUAGES:
+        raise HTTPException(status_code=400, detail=f"Unsupported lang (use one of: {', '.join(SUPPORTED_LANGUAGES)})")
+
+    cache_key = f"captions:{video_id}:{lang}"
+    lock_key = f"captions_lock:{video_id}:{lang}"
+    r = await get_redis()
+    try:
+        cached = await r.get(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        full_raw = await r.get("cours_full")
+        known = json.loads(full_raw) if full_raw else []
+        if not any(v.get("id") == video_id for v in known):
+            raise HTTPException(status_code=404, detail="Unknown video")
+
+        if not await r.set(lock_key, "1", nx=True, ex=CAPTIONS_LOCK_TTL):
+            return JSONResponse(status_code=202, content={"status": "pending"})
+
+        try:
+            seg_raw = await r.get(f"transcript_segments:{video_id}")
+            if seg_raw:
+                segments = json.loads(seg_raw)
+            else:
+                from transcript_utils import fetch_hebrew_transcript, NoHebrewTranscript, TranscriptFetchBlocked
+                try:
+                    segments, _ = await asyncio.to_thread(fetch_hebrew_transcript, video_id)
+                except NoHebrewTranscript as e:
+                    raise HTTPException(status_code=404, detail=f"No Hebrew captions to translate: {e}")
+                except TranscriptFetchBlocked as e:
+                    raise HTTPException(status_code=503, detail=str(e))
+                await r.set(f"transcript_segments:{video_id}", json.dumps(segments, ensure_ascii=False))
+
+            if len(segments) > MAX_SEGMENTS:
+                raise HTTPException(status_code=413, detail="Lesson too long to translate")
+
+            from ai_keywords_utils import GeminiUnavailableError
+            try:
+                translated = await asyncio.to_thread(translate_segments, segments, lang)
+            except GeminiUnavailableError as e:
+                raise HTTPException(status_code=503, detail=f"Translation unavailable right now: {e}")
+            except Exception as e:
+                print(f"[captions] translation failed for {video_id}/{lang}: {type(e).__name__}: {e}")
+                raise HTTPException(status_code=503, detail="Translation failed; try again later")
+            if not translated:
+                raise HTTPException(status_code=503, detail="Translation came back empty; try again later")
+
+            payload = {"video_id": video_id, "lang": lang, "segments": translated}
+            await r.set(cache_key, json.dumps(payload, ensure_ascii=False))
+            return payload
+        finally:
+            await r.delete(lock_key)
+    finally:
+        await r.aclose()
 
 
 @app.post("/api/sync")

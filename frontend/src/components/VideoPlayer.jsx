@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
-import { Play, Pause, Volume2, VolumeX, Maximize, Minimize, Captions, CaptionsOff } from 'lucide-react'
+import { Play, Pause, Volume2, VolumeX, Maximize, Minimize, Captions, CaptionsOff, Languages, Check } from 'lucide-react'
 
 // Loads the YouTube IFrame Player API script once and resolves with the
 // global YT namespace (shared across every modal opened on the page).
@@ -38,6 +38,84 @@ function applyCaptions(player, on) {
   }
 }
 
+// Loading the module alone doesn't display anything for viewers whose
+// YouTube preference is captions-off, so the Hebrew track is also selected
+// explicitly - retried briefly, since the module loads asynchronously.
+function showHebrewCaptions(player) {
+  applyCaptions(player, true)
+  let tries = 10
+  const attempt = () => {
+    try {
+      const track = player.getOption('captions', 'track')
+      if (track?.languageCode && !track.translationLanguage) return
+      player.setOption('captions', 'track', { languageCode: 'iw' })
+    } catch { /* module not ready yet */ }
+    if (--tries > 0) setTimeout(attempt, 400)
+  }
+  attempt()
+}
+
+// Caption language: 'iw' = YouTube's own (auto-generated Hebrew) captions;
+// the others are translated from that transcript by our backend
+// (GET /api/captions, Gemini) and drawn by this component - YouTube refuses
+// its own auto-translated captions (429) inside embedded players.
+const CAPTION_LANGUAGES = [
+  { code: 'iw', label: 'עברית' },
+  { code: 'en', label: 'English' },
+  { code: 'fr', label: 'Français' },
+  { code: 'ru', label: 'Русский' },
+]
+const CC_LANG_STORAGE_KEY = 'player_cc_lang'
+function readCcLangPref() {
+  try {
+    const v = localStorage.getItem(CC_LANG_STORAGE_KEY)
+    return CAPTION_LANGUAGES.some(l => l.code === v) ? v : 'iw'
+  } catch { return 'iw' }
+}
+
+// Translated captions per video+language, kept for the page session so
+// reopening a video doesn't refetch.
+const translatedCache = new Map()
+const sleep = ms => new Promise(res => setTimeout(res, ms))
+
+// The first request for a video+language runs the translation (~20s, up to
+// a couple of minutes for long lessons). 202 = someone else's request is
+// already translating it, and a 502/504 means the proxy gave up waiting
+// while the backend kept going - both just mean "poll until it's cached".
+async function fetchTranslatedCaptions(videoId, lang, signal) {
+  const key = `${videoId}:${lang}`
+  if (translatedCache.has(key)) return translatedCache.get(key)
+  for (let attempt = 0; attempt < 40; attempt++) {
+    const r = await fetch(`/api/captions/${encodeURIComponent(videoId)}?lang=${lang}`, { signal })
+    if (r.status === 202 || r.status === 502 || r.status === 504) {
+      await sleep(5000)
+      continue
+    }
+    if (!r.ok) throw new Error({ 404: 'none', 413: 'toolong' }[r.status] || 'unavailable')
+    const segments = (await r.json()).segments || []
+    translatedCache.set(key, segments)
+    return segments
+  }
+  throw new Error('unavailable')
+}
+
+// Lines on screen at time t. Auto-generated segments overlap (a two-line
+// roll-up, like YouTube's own display), so up to the last two segments
+// that haven't ended yet are shown.
+function activeCaptionLines(segments, t) {
+  let lo = 0, hi = segments.length - 1, idx = -1
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (segments[mid].start <= t) { idx = mid; lo = mid + 1 } else hi = mid - 1
+  }
+  const lines = []
+  for (const i of [idx - 1, idx]) {
+    const seg = segments[i]
+    if (seg && t < seg.start + seg.duration) lines.push(seg.text)
+  }
+  return lines
+}
+
 function formatTime(sec) {
   if (!Number.isFinite(sec) || sec < 0) return '0:00'
   const total = Math.floor(sec)
@@ -52,7 +130,7 @@ function formatTime(sec) {
 // YouTube surface (its logo/title links, related-video end screen, etc.) -
 // playback is only controllable through this component's own UI:
 // play/pause + position in the header above the video (hidden in full
-// screen), mute/volume/captions/fullscreen in the footer below it.
+// screen), mute/volume/captions/caption-language/fullscreen in the footer.
 //
 // startAt — seconds to start at; changing it while open (a topic or
 // transcript chunk clicked in the modal) seeks the running player there
@@ -72,6 +150,12 @@ export default function VideoPlayer({ videoId, title, startAt = null }) {
   const [ccOn, setCcOn] = useState(readCcPref)
   // Read inside the YT event handlers, which are bound once per player.
   const ccOnRef = useRef(ccOn)
+  const [ccLang, setCcLang] = useState(readCcLangPref)
+  const ccLangRef = useRef(ccLang)
+  const [langMenuOpen, setLangMenuOpen] = useState(false)
+  const langMenuRef = useRef(null)
+  // Our own translated captions: {status: 'loading'|'ready'|'none'|'toolong'|'unavailable', segments}
+  const [translated, setTranslated] = useState(null)
   // 'native' = Fullscreen API, 'css' = fixed-overlay fallback for browsers
   // without element fullscreen (iPhone Safari), null = normal.
   const [fullscreen, setFullscreen] = useState(null)
@@ -137,8 +221,11 @@ export default function VideoPlayer({ videoId, title, startAt = null }) {
           onStateChange: e => {
             // The captions module only loads once playback starts, so
             // "off" has to be (re)applied here rather than in onReady.
-            if (e.data === YT.PlayerState.PLAYING && !ccOnRef.current) {
-              applyCaptions(e.target, false)
+            // YouTube's own captions are only wanted for Hebrew; translated
+            // ones are drawn by us on top of the video.
+            if (e.data === YT.PlayerState.PLAYING) {
+              if (ccOnRef.current && ccLangRef.current === 'iw') showHebrewCaptions(e.target)
+              else applyCaptions(e.target, false)
             }
             setPlaying(e.data === YT.PlayerState.PLAYING)
             setDuration(e.target.getDuration())
@@ -154,7 +241,7 @@ export default function VideoPlayer({ videoId, title, startAt = null }) {
       } catch {
         // player not fully ready yet - next tick will retry
       }
-    }, 500)
+    }, 250) // 250ms keeps our own drawn captions in step with the speech
 
     return () => {
       destroyed = true
@@ -212,13 +299,56 @@ export default function VideoPlayer({ videoId, title, startAt = null }) {
     setMuted(!muted)
   }
 
+  function syncYoutubeCaptions() {
+    if (!readyRef.current) return
+    if (ccOnRef.current && ccLangRef.current === 'iw') showHebrewCaptions(playerRef.current)
+    else applyCaptions(playerRef.current, false)
+  }
+
   function toggleCaptions() {
     const next = !ccOn
     setCcOn(next)
     ccOnRef.current = next
     try { localStorage.setItem(CC_STORAGE_KEY, next ? '1' : '0') } catch { /* storage blocked */ }
-    if (readyRef.current) applyCaptions(playerRef.current, next)
+    syncYoutubeCaptions()
   }
+
+  // Picking a language also turns captions on.
+  function selectCaptionLanguage(lang) {
+    setLangMenuOpen(false)
+    setCcLang(lang)
+    ccLangRef.current = lang
+    try { localStorage.setItem(CC_LANG_STORAGE_KEY, lang) } catch { /* storage blocked */ }
+    if (!ccOnRef.current) toggleCaptions()
+    else syncYoutubeCaptions()
+  }
+
+  useEffect(() => {
+    if (!ccOn || ccLang === 'iw' || !videoId) {
+      setTranslated(null)
+      return
+    }
+    const controller = new AbortController()
+    setTranslated({ status: 'loading', segments: [] })
+    fetchTranslatedCaptions(videoId, ccLang, controller.signal)
+      .then(segments => setTranslated({ status: 'ready', segments }))
+      .catch(err => {
+        if (err.name !== 'AbortError') setTranslated({ status: err.message, segments: [] })
+      })
+    return () => controller.abort()
+  }, [ccOn, ccLang, videoId])
+
+  useEffect(() => {
+    if (!langMenuOpen) return
+    const onDown = e => { if (!langMenuRef.current?.contains(e.target)) setLangMenuOpen(false) }
+    const onKey = e => { if (e.key === 'Escape') setLangMenuOpen(false) }
+    document.addEventListener('pointerdown', onDown)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [langMenuOpen])
 
   function toggleFullscreen() {
     const el = wrapperRef.current
@@ -240,6 +370,13 @@ export default function VideoPlayer({ videoId, title, startAt = null }) {
 
   const isFull = fullscreen !== null
   const isMuted = muted || volume === 0
+  const captionLines = translated?.status === 'ready' ? activeCaptionLines(translated.segments, current) : []
+  const captionNote = {
+    loading: 'מתרגם כתוביות… (בפעם הראשונה זה עשוי לקחת עד דקה או שתיים)',
+    none: 'אין כתוביות לתרגום בשיעור זה',
+    toolong: 'תרגום כתוביות זמין לשיעורים של עד כ-20 דקות',
+    unavailable: 'התרגום אינו זמין כרגע, נסו שוב מאוחר יותר',
+  }[translated?.status]
 
   return (
     <div
@@ -289,6 +426,19 @@ export default function VideoPlayer({ videoId, title, startAt = null }) {
         {/* Blocks all direct interaction with the YouTube player underneath;
             a click on the video just toggles play/pause. */}
         <div style={styles.fill} onClick={togglePlay} title={title} />
+        {(captionLines.length > 0 || captionNote) && (
+          <div style={styles.captionArea} aria-live="polite">
+            {captionNote ? (
+              <span style={{ ...styles.captionLine, ...styles.captionNote }}>{captionNote}</span>
+            ) : (
+              captionLines.map((line, i) => (
+                <span key={i} dir="auto" style={{ ...styles.captionLine, ...(isFull ? styles.captionLineFull : {}) }}>
+                  {line}
+                </span>
+              ))
+            )}
+          </div>
+        )}
       </div>
 
       {/* Footer: mute, volume, fullscreen. */}
@@ -323,6 +473,33 @@ export default function VideoPlayer({ videoId, title, startAt = null }) {
         >
           {ccOn ? <Captions size={18} /> : <CaptionsOff size={18} />}
         </button>
+        <div ref={langMenuRef} style={styles.menuAnchor}>
+          <button
+            type="button"
+            onClick={() => setLangMenuOpen(o => !o)}
+            style={{ ...styles.iconBtn, ...(langMenuOpen ? styles.iconBtnActive : {}) }}
+            aria-label="שפת כתוביות"
+            aria-haspopup="menu"
+            aria-expanded={langMenuOpen}
+            title="שפת כתוביות"
+          >
+            <Languages size={18} />
+          </button>
+          {langMenuOpen && (
+            <div style={styles.menu} role="menu">
+              <div style={styles.menuHeading}>שפת כתוביות</div>
+              {CAPTION_LANGUAGES.map(l => (
+                <LangItem
+                  key={l.code}
+                  label={l.label}
+                  selected={ccOn && ccLang === l.code}
+                  onClick={() => selectCaptionLanguage(l.code)}
+                />
+              ))}
+              <div style={styles.menuFootnote}>תרגום אוטומטי (AI) מתוך התמלול העברי</div>
+            </div>
+          )}
+        </div>
         <button
           type="button"
           onClick={toggleFullscreen}
@@ -334,6 +511,21 @@ export default function VideoPlayer({ videoId, title, startAt = null }) {
         </button>
       </div>
     </div>
+  )
+}
+
+function LangItem({ label, selected, onClick }) {
+  return (
+    <button
+      type="button"
+      role="menuitemradio"
+      aria-checked={selected}
+      onClick={onClick}
+      style={{ ...styles.menuItem, ...(selected ? styles.menuItemSelected : {}) }}
+    >
+      <span style={styles.menuCheck}>{selected && <Check size={14} />}</span>
+      {label}
+    </button>
   )
 }
 
@@ -386,6 +578,98 @@ const styles = {
     border: 'none',
     color: '#1A3A5C',
     cursor: 'pointer',
+  },
+  iconBtnActive: {
+    background: 'rgba(184,134,11,.15)',
+  },
+  menuAnchor: {
+    position: 'relative',
+    flexShrink: 0,
+  },
+  // Opens upward over the video; the player wrapper clips overflow, so the
+  // height stays within a small video's area and scrolls.
+  menu: {
+    position: 'absolute',
+    bottom: 'calc(100% + 8px)',
+    left: 0,
+    zIndex: 5,
+    width: 200,
+    maxHeight: 220,
+    overflowY: 'auto',
+    background: '#FFFDF8',
+    border: '1px solid rgba(184,134,11,.3)',
+    borderRadius: 8,
+    boxShadow: '0 6px 20px rgba(0,0,0,.25)',
+    padding: '4px 0',
+    direction: 'rtl',
+  },
+  menuHeading: {
+    padding: '6px 12px 2px',
+    fontSize: '.7rem',
+    fontWeight: 600,
+    color: '#8B6914',
+    fontFamily: "'Heebo', sans-serif",
+  },
+  menuFootnote: {
+    padding: '6px 12px 4px',
+    marginTop: 4,
+    borderTop: '1px solid rgba(184,134,11,.2)',
+    fontSize: '.65rem',
+    color: '#8B7D63',
+    fontFamily: "'Heebo', sans-serif",
+  },
+  // Drawn over the click-blocking layer but lets clicks through to it.
+  captionArea: {
+    position: 'absolute',
+    left: '5%',
+    right: '5%',
+    bottom: '7%',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 2,
+    pointerEvents: 'none',
+  },
+  captionLine: {
+    maxWidth: '100%',
+    padding: '1px 8px',
+    background: 'rgba(8,8,8,.75)',
+    color: '#fff',
+    fontSize: 'clamp(12px, 2.4vw, 18px)',
+    lineHeight: 1.35,
+    textAlign: 'center',
+    borderRadius: 3,
+    fontFamily: "'Heebo', 'Arial', sans-serif",
+  },
+  captionLineFull: {
+    fontSize: 'clamp(16px, 2.6vw, 30px)',
+  },
+  captionNote: {
+    fontSize: 'clamp(11px, 2vw, 14px)',
+    direction: 'rtl',
+  },
+  menuItem: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    width: '100%',
+    padding: '6px 12px',
+    background: 'transparent',
+    border: 'none',
+    textAlign: 'right',
+    fontSize: '.8rem',
+    fontFamily: "'Heebo', sans-serif",
+    color: '#1A3A5C',
+    cursor: 'pointer',
+  },
+  menuItemSelected: {
+    fontWeight: 600,
+    background: 'rgba(184,134,11,.1)',
+  },
+  menuCheck: {
+    display: 'inline-flex',
+    width: 14,
+    flexShrink: 0,
   },
   time: {
     flexShrink: 0,

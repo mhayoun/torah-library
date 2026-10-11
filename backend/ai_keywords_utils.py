@@ -144,6 +144,19 @@ class GeminiTransientError(GeminiUnavailableError):
     pass
 
 
+class GeminiModelUnsupportedError(GeminiUnavailableError):
+    """
+    Raised when a Gemini model rejects the request itself (400
+    INVALID_ARGUMENT) - e.g. a Gemma model that doesn't accept a system
+    instruction, or an image/TTS model that can't return JSON. The model
+    discovery in _get_model_candidates() can rank such models as fallbacks,
+    and they're only reached once the preferred ones are quota-exhausted.
+    _call_gemini() skips the model for the rest of the run (it won't start
+    accepting the same request later) and tries the next candidate.
+    """
+    pass
+
+
 class GroqUnavailableError(RuntimeError):
     """
     Base class: raised when Groq could not fulfill the request through
@@ -467,20 +480,24 @@ def _parse_topics_response(raw_text: str, video_duration: float) -> list:
     return cleaned
 
 
-def _call_gemini_one(user_content: str, model: str) -> str:
+def _call_gemini_one(user_content: str, model: str, system_prompt: str = None,
+                     response_schema: dict = None) -> str:
     """Calls one specific Gemini model. Returns raw text output, or raises
     QuotaExhaustedError on a 429, or GeminiTransientError on a temporary
     server-side error (503/500/504)."""
     client = _get_client()
+    config = {
+        "system_instruction": system_prompt or _SYSTEM_PROMPT,
+        "response_mime_type": "application/json",
+        "temperature": 0.2,
+    }
+    if response_schema:
+        config["response_schema"] = response_schema
     try:
         response = client.models.generate_content(
             model=model,
             contents=user_content,
-            config={
-                "system_instruction": _SYSTEM_PROMPT,
-                "response_mime_type": "application/json",
-                "temperature": 0.2,
-            },
+            config=config,
         )
     except Exception as e:
         code = getattr(e, "code", None)
@@ -497,6 +514,11 @@ def _call_gemini_one(user_content: str, model: str) -> str:
                 "rate limit instead (a nonzero limit you've temporarily "
                 "used up), just wait and re-run."
             ) from e
+        if code == 400 or "INVALID_ARGUMENT" in text:
+            raise GeminiModelUnsupportedError(
+                f"Gemini model '{model}' rejected the request "
+                f"({type(e).__name__}: {e}); skipping it."
+            ) from e
         if (code in (500, 503, 504) or
                 any(m in text for m in ("UNAVAILABLE", "INTERNAL", "DEADLINE_EXCEEDED"))):
             raise GeminiTransientError(
@@ -508,7 +530,8 @@ def _call_gemini_one(user_content: str, model: str) -> str:
     return response.text
 
 
-def _call_gemini(user_content: str) -> str:
+def _call_gemini(user_content: str, system_prompt: str = None,
+                 response_schema: dict = None) -> str:
     """
     Tries each ranked Gemini model candidate in turn, skipping any already
     known (this run) to be quota-exhausted. Free-tier quotas are generally
@@ -531,7 +554,7 @@ def _call_gemini(user_content: str) -> str:
         if model in _exhausted_models:
             continue
         try:
-            text = _call_gemini_one(user_content, model)
+            text = _call_gemini_one(user_content, model, system_prompt, response_schema)
             if model != candidates[0]:
                 print(f"[ai_keywords_utils] ✅ Succeeded with '{model}' "
                       f"(earlier candidate(s) exhausted this run)")
@@ -540,6 +563,12 @@ def _call_gemini(user_content: str) -> str:
             print(f"[ai_keywords_utils] ⚠️  '{model}' quota exhausted (429); "
                   f"trying next Gemini model candidate…")
             _exhausted_models.add(model)  # daily quota — won't recover this run
+            last_err = e
+            continue
+        except GeminiModelUnsupportedError as e:
+            print(f"[ai_keywords_utils] ⚠️  '{model}' doesn't support this request "
+                  f"(400); trying next Gemini model candidate…")
+            _exhausted_models.add(model)  # won't start accepting it this run
             last_err = e
             continue
         except GeminiTransientError as e:
