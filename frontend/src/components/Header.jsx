@@ -1,5 +1,6 @@
 import React, { useState } from 'react'
-import { Search, BookOpen, Menu, X, Loader2, Mail } from 'lucide-react'
+import { Search, BookOpen, Menu, X, Loader2, Mail, Download } from 'lucide-react'
+import useInstallPrompt from '../hooks/useInstallPrompt'
 
 const NAV_ITEMS = [
   { key: 'כל הקטגוריות', label: 'כל הקטגוריות' },
@@ -19,6 +20,7 @@ export default function Header({ activeTab, onTabChange }) {
   // even though switching tabs itself is fast since the data is already
   // loaded client-side).
   const [loadingTab, setLoadingTab] = useState(null)
+  const install = useInstallPrompt()
 
   const handleTab = (key) => {
     if (loadingTab) return
@@ -64,6 +66,12 @@ export default function Header({ activeTab, onTabChange }) {
               </button>
             )
           })}
+          {install && (
+            <button style={{ ...styles.navBtn, ...styles.installBtn }} onClick={install}>
+              <Download size={14} style={{ marginLeft: 4 }} />
+              התקנת האפליקציה
+            </button>
+          )}
         </nav>
 
         {/* Mobile hamburger */}
@@ -93,6 +101,15 @@ export default function Header({ activeTab, onTabChange }) {
               </button>
             )
           })}
+          {install && (
+            <button
+              style={{ ...styles.mobileBtn, ...styles.installBtn }}
+              onClick={() => { setMobileOpen(false); install() }}
+            >
+              <Download size={14} style={{ marginLeft: 6 }} />
+              התקנת האפליקציה
+            </button>
+          )}
         </div>
       )}
     </header>
@@ -198,6 +215,11 @@ const styles = {
     display: 'flex',
     alignItems: 'center',
     borderBottom: '1px solid rgba(255,255,255,.06)',
+  },
+  installBtn: {
+    color: '#D4A017',
+    border: '1px solid rgba(212,160,23,.55)',
+    fontWeight: 600,
   },
   mobileBtnActive: {
     color: '#D4A017',
